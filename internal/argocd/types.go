@@ -71,9 +71,10 @@ type Destination struct {
 }
 
 type ApplicationStatus struct {
-	Sync    SyncStatus    `json:"sync"`
-	Health  HealthStatus  `json:"health"`
-	Summary AppSummary    `json:"summary"`
+	Sync      SyncStatus       `json:"sync"`
+	Health    HealthStatus     `json:"health"`
+	Summary   AppSummary       `json:"summary"`
+	Resources []ResourceStatus `json:"resources"`
 }
 
 type SyncStatus struct {
@@ -82,9 +83,22 @@ type SyncStatus struct {
 }
 
 type HealthStatus struct {
-	Status string `json:"status"`
+	Status  string `json:"status"`
+	Message string `json:"message"`
 }
 
 type AppSummary struct {
 	Images []string `json:"images"`
+}
+
+// ResourceStatus is one entry from .status.resources[] — the per-resource
+// sync and health state that ArgoCD tracks for every object it manages.
+type ResourceStatus struct {
+	Group     string       `json:"group"`
+	Version   string       `json:"version"`
+	Kind      string       `json:"kind"`
+	Namespace string       `json:"namespace"`
+	Name      string       `json:"name"`
+	Status    string       `json:"status"` // sync status: Synced | OutOfSync | Unknown
+	Health    *HealthStatus `json:"health"` // nil when ArgoCD has no health check for this kind
 }

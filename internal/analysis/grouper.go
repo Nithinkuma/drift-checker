@@ -67,7 +67,25 @@ func buildInstance(
 	for _, img := range app.Status.Summary.Images {
 		inst.Images = append(inst.Images, ParseImage(img))
 	}
+	for _, res := range app.Status.Resources {
+		inst.Resources = append(inst.Resources, mapResource(res))
+	}
 	return inst
+}
+
+func mapResource(r argocd.ResourceStatus) domain.ResourceStatus {
+	rs := domain.ResourceStatus{
+		Group:      r.Group,
+		Kind:       r.Kind,
+		Name:       r.Name,
+		Namespace:  r.Namespace,
+		SyncStatus: r.Status,
+	}
+	if r.Health != nil {
+		rs.HealthStatus = r.Health.Status
+		rs.HealthMsg = r.Health.Message
+	}
+	return rs
 }
 
 // resolveRegion derives a human-readable region label from the app destination.

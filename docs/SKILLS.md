@@ -25,24 +25,81 @@ Key facts:
 An ArgoCD `Application` represents a single deployment of a workload to a single
 cluster. One AppSet → N Applications (one per cluster/region).
 
-Fields that matter for drift detection:
+Fields used by this tool:
 
 ```
 .metadata.name                         # e.g. myapp-prod-us
 .metadata.labels
-  argocd.argoproj.io/app-set-name      # parent AppSet name
+  argocd.argoproj.io/app-set-name      # parent AppSet name — primary grouping key
 .spec.destination.name                 # cluster friendly name (preferred for region)
 .spec.destination.server               # k8s API server URL (fallback)
 .spec.destination.namespace            # target namespace
-.status.sync.status                    # Synced | OutOfSync | Unknown
-.status.sync.revision                  # Git commit SHA of what's running
-.status.health.status                  # Healthy | Progressing | Degraded | Missing
-.status.summary.images[]               # list of image strings currently running
+.status.sync.status                    # app-level aggregate: Synced | OutOfSync | Unknown
+.status.sync.revision                  # Git commit SHA currently applied
+.status.health.status                  # app-level aggregate: Healthy | Progressing | Degraded | Missing
+.status.summary.images[]               # list of image strings currently running (live cluster state)
+.status.resources[]                    # per-resource sync + health — see below
 ```
 
-The `.status.summary.images[]` field is populated by ArgoCD from live cluster state.
-It reflects what is **actually running**, not what Git says should run — making it
-the right source of truth for drift detection.
+The `.status.summary.images[]` field is populated from live cluster state.
+It reflects what is **actually running**, not what Git says should run — the right
+source of truth for image drift detection.
+
+### App-level vs Resource-level sync and health
+
+ArgoCD surfaces state at **two levels**:
+
+**App-level** (`.status.sync.status`, `.status.health.status`):
+- These are **aggregates** rolled up from all managed resources.
+- If any resource is OutOfSync → app is OutOfSync.
+- If any resource is Degraded → app is Degraded.
+- Useful as a quick summary, but gives no information about **which** resource is the problem.
+
+**Resource-level** (`.status.resources[]`):
+- One entry per Kubernetes object managed by the Application.
+- Each entry has its own `.status` (sync) and `.health.status`.
+- This is the source of truth used by this tool for drift detection.
+
+```
+.status.resources[]:
+  group      # API group, e.g. "apps", "argoproj.io", "keda.sh"
+  version    # API version
+  kind       # Deployment | StatefulSet | Rollout | PodDisruptionBudget | ...
+  namespace
+  name
+  status     # sync state: Synced | OutOfSync | Unknown
+  health:
+    status   # Healthy | Progressing | Degraded | Missing | Unknown
+    message  # human-readable detail (e.g. pod crash reason)
+```
+
+### Sync vs Health — at resource level
+
+These are independent axes, evaluated per workload:
+
+| Resource sync | Resource health | Meaning |
+|---------------|-----------------|---------|
+| Synced | Healthy | Running the version Git specifies, pods healthy |
+| Synced | Degraded | Running desired version but pods are crashing |
+| OutOfSync | Healthy | Still running old version; Git has a newer spec |
+| OutOfSync | Degraded | Old version AND unhealthy |
+| Synced | Progressing | Rollout / canary in flight — transient, not flagged as drift |
+
+### Workload kinds (sync + health tracked)
+
+`Deployment`, `StatefulSet`, `DaemonSet`, `Rollout` (Argo Rollouts), `Job`
+
+Sync state is only meaningful for these kinds. A ConfigMap being OutOfSync
+is informational; a Deployment being OutOfSync means the wrong image is running.
+
+### Supporting resource kinds (health only tracked)
+
+`PodDisruptionBudget`, `ScaledObject` (KEDA), `HorizontalPodAutoscaler`
+
+These don't have meaningful sync state from a drift perspective, but their
+health state directly affects application behaviour:
+- A degraded PDB means Kubernetes cannot safely evict pods (blocks upgrades/node drains).
+- A degraded ScaledObject means KEDA cannot scale the workload.
 
 ### Cluster Object
 
@@ -56,20 +113,7 @@ Each cluster has:
 ```
 
 The `.name` is the preferred way to derive a region label. Teams can also add
-custom labels to clusters via the ArgoCD UI or CLI.
-
-### Sync vs Health
-
-These are independent axes:
-
-| Sync | Health | Meaning |
-|------|--------|---------|
-| Synced | Healthy | Good — live state matches Git |
-| Synced | Degraded | Running desired version but pods crashing |
-| OutOfSync | Healthy | Running old version; newer version in Git |
-| OutOfSync | Degraded | Both out of date AND unhealthy |
-
-For drift detection, `OutOfSync` is the primary signal that a cluster is behind.
+a custom label `drift-checker/region` to the cluster object for explicit mapping.
 
 ---
 

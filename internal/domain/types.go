@@ -28,16 +28,30 @@ type AppSet struct {
 }
 
 // AppInstance is one ArgoCD Application — one deployment in one cluster/region.
+// SyncStatus and HealthStatus are the ArgoCD aggregate values for the whole app.
+// Per-workload detail lives in Resources.
 type AppInstance struct {
-	Name          string     `json:"name"`
-	Region        string     `json:"region"`
-	ClusterName   string     `json:"cluster_name"`
-	ClusterServer string     `json:"cluster_server"`
-	Namespace     string     `json:"namespace"`
-	SyncStatus    string     `json:"sync_status"`
-	HealthStatus  string     `json:"health_status"`
-	Revision      string     `json:"revision,omitempty"`
-	Images        []ImageRef `json:"images"`
+	Name          string           `json:"name"`
+	Region        string           `json:"region"`
+	ClusterName   string           `json:"cluster_name"`
+	ClusterServer string           `json:"cluster_server"`
+	Namespace     string           `json:"namespace"`
+	SyncStatus    string           `json:"sync_status"`
+	HealthStatus  string           `json:"health_status"`
+	Revision      string           `json:"revision,omitempty"`
+	Images        []ImageRef       `json:"images"`
+	Resources     []ResourceStatus `json:"resources,omitempty"`
+}
+
+// ResourceStatus is the per-resource sync and health state as reported by ArgoCD.
+type ResourceStatus struct {
+	Group        string `json:"group,omitempty"`
+	Kind         string `json:"kind"`
+	Name         string `json:"name"`
+	Namespace    string `json:"namespace,omitempty"`
+	SyncStatus   string `json:"sync_status,omitempty"`
+	HealthStatus string `json:"health_status,omitempty"`
+	HealthMsg    string `json:"health_message,omitempty"`
 }
 
 // ImageRef is a parsed container image reference.
@@ -53,8 +67,19 @@ type ImageRef struct {
 type DriftDetail struct {
 	Type            string            `json:"type"`
 	ImageRepository string            `json:"image_repository,omitempty"`
+	// Resource is set for sync/health drift events to identify which workload triggered it.
+	Resource        *ResourceRef      `json:"resource,omitempty"`
 	Message         string            `json:"message"`
+	// Regions maps region name to the observed value (tag, digest, sync status, health status).
 	Regions         map[string]string `json:"regions,omitempty"`
+}
+
+// ResourceRef identifies a Kubernetes resource within a DriftDetail.
+type ResourceRef struct {
+	Group     string `json:"group,omitempty"`
+	Kind      string `json:"kind"`
+	Name      string `json:"name"`
+	Namespace string `json:"namespace,omitempty"`
 }
 
 // Drift type constants.
