@@ -6,13 +6,10 @@ import (
 	"github.com/nithinkuma/drift-checker/internal/domain"
 )
 
-func makeApp(name, region, syncStatus, healthStatus string, images ...string) domain.AppInstance {
-	inst := domain.AppInstance{
-		Name:         name,
-		Region:       region,
-		SyncStatus:   syncStatus,
-		HealthStatus: healthStatus,
-	}
+// ---- helpers ----
+
+func makeApp(name, region string, images ...string) domain.AppInstance {
+	inst := domain.AppInstance{Name: name, Region: region}
 	for _, img := range images {
 		inst.Images = append(inst.Images, ParseImage(img))
 	}
@@ -24,261 +21,196 @@ func withResources(app domain.AppInstance, resources ...domain.ResourceStatus) d
 	return app
 }
 
-func depResource(name, syncStatus, healthStatus string) domain.ResourceStatus {
+func workload(kind, name, syncStatus, healthStatus string) domain.ResourceStatus {
 	return domain.ResourceStatus{
-		Kind:         "Deployment",
+		Kind:         kind,
 		Name:         name,
 		SyncStatus:   syncStatus,
 		HealthStatus: healthStatus,
 	}
 }
 
-func stsResource(name, syncStatus, healthStatus string) domain.ResourceStatus {
-	return domain.ResourceStatus{
-		Kind:         "StatefulSet",
-		Name:         name,
-		SyncStatus:   syncStatus,
-		HealthStatus: healthStatus,
-	}
-}
-
-func pdbResource(name, healthStatus string) domain.ResourceStatus {
-	return domain.ResourceStatus{
-		Kind:         "PodDisruptionBudget",
-		Name:         name,
-		HealthStatus: healthStatus,
-	}
-}
-
-// ---- Image drift tests ----
-
-func TestDetect_NoImages_NoApps(t *testing.T) {
-	result := Detect([]domain.AppSet{{Name: "empty"}})
-	if result[0].DriftDetected {
-		t.Error("expected no drift for empty appset")
-	}
-}
+// ---- image drift ----
 
 func TestDetect_ImageTagDrift(t *testing.T) {
-	as := domain.AppSet{
-		Name: "myapp",
-		Apps: []domain.AppInstance{
-			makeApp("myapp-prod-us", "prod-us", "Synced", "Healthy", "gcr.io/proj/myapp:v1.2.3"),
-			makeApp("myapp-prod-ir", "prod-ir", "Synced", "Healthy", "gcr.io/proj/myapp:v1.2.2"),
-		},
-	}
-	result := Detect([]domain.AppSet{as})
-	r := result[0]
-
-	if !r.DriftDetected {
-		t.Fatal("expected drift detected")
-	}
-	if !ContainsDriftType(r.DriftTypes, domain.DriftImageTag) {
-		t.Errorf("expected IMAGE_TAG_DRIFT in %v", r.DriftTypes)
-	}
+	as := domain.AppSet{Name: "myapp", Apps: []domain.AppInstance{
+		makeApp("myapp-prod-us", "prod-us", "gcr.io/proj/myapp:v1.2.3"),
+		makeApp("myapp-prod-ir", "prod-ir", "gcr.io/proj/myapp:v1.2.2"),
+	}}
+	r := Detect([]domain.AppSet{as})[0]
+	assertDrift(t, r, domain.DriftImageTag)
 }
 
-func TestDetect_SameTag_DifferentDigest(t *testing.T) {
-	as := domain.AppSet{
-		Name: "myapp",
-		Apps: []domain.AppInstance{
-			makeApp("myapp-prod-us", "prod-us", "Synced", "Healthy", "gcr.io/proj/myapp:v1.0@sha256:aaaa"),
-			makeApp("myapp-prod-ir", "prod-ir", "Synced", "Healthy", "gcr.io/proj/myapp:v1.0@sha256:bbbb"),
-		},
-	}
-	result := Detect([]domain.AppSet{as})
-	r := result[0]
-
-	if !r.DriftDetected {
-		t.Fatal("expected drift detected")
-	}
-	if !ContainsDriftType(r.DriftTypes, domain.DriftImageDigest) {
-		t.Errorf("expected IMAGE_DIGEST_DRIFT in %v", r.DriftTypes)
-	}
+func TestDetect_DigestDrift(t *testing.T) {
+	as := domain.AppSet{Name: "myapp", Apps: []domain.AppInstance{
+		makeApp("myapp-prod-us", "prod-us", "gcr.io/proj/myapp:v1.0@sha256:aaaa"),
+		makeApp("myapp-prod-ir", "prod-ir", "gcr.io/proj/myapp:v1.0@sha256:bbbb"),
+	}}
+	r := Detect([]domain.AppSet{as})[0]
+	assertDrift(t, r, domain.DriftImageDigest)
 }
 
-func TestDetect_AllSynced_NoDrift(t *testing.T) {
-	as := domain.AppSet{
-		Name: "myapp",
-		Apps: []domain.AppInstance{
-			makeApp("myapp-prod-us", "prod-us", "Synced", "Healthy", "gcr.io/proj/myapp:v1.0@sha256:aaaa"),
-			makeApp("myapp-prod-ir", "prod-ir", "Synced", "Healthy", "gcr.io/proj/myapp:v1.0@sha256:aaaa"),
-		},
-	}
-	result := Detect([]domain.AppSet{as})
-	if result[0].DriftDetected {
-		t.Errorf("expected no drift, got types: %v", result[0].DriftTypes)
-	}
+func TestDetect_NoDrift_MatchingImages(t *testing.T) {
+	as := domain.AppSet{Name: "myapp", Apps: []domain.AppInstance{
+		makeApp("myapp-prod-us", "prod-us", "gcr.io/proj/myapp:v1.0@sha256:aaaa"),
+		makeApp("myapp-prod-ir", "prod-ir", "gcr.io/proj/myapp:v1.0@sha256:aaaa"),
+	}}
+	r := Detect([]domain.AppSet{as})[0]
+	assertNoDrift(t, r)
 }
 
-// ---- Resource-level sync drift tests ----
+// ---- workload sync drift ----
 
 func TestDetect_DeploymentOutOfSync(t *testing.T) {
-	as := domain.AppSet{
-		Name: "myapp",
-		Apps: []domain.AppInstance{
-			withResources(
-				makeApp("myapp-prod-us", "prod-us", "Synced", "Healthy"),
-				depResource("myapp", "Synced", "Healthy"),
-			),
-			withResources(
-				makeApp("myapp-prod-ir", "prod-ir", "OutOfSync", "Healthy"),
-				depResource("myapp", "OutOfSync", "Healthy"),
-			),
-		},
-	}
-	result := Detect([]domain.AppSet{as})
-	r := result[0]
-
-	if !r.DriftDetected {
-		t.Fatal("expected drift detected")
-	}
-	if !ContainsDriftType(r.DriftTypes, domain.DriftSync) {
-		t.Errorf("expected SYNC_DRIFT in %v", r.DriftTypes)
-	}
-
-	// Verify the detail names the correct resource
-	found := false
-	for _, d := range r.DriftDetails {
-		if d.Type == domain.DriftSync && d.Resource != nil && d.Resource.Kind == "Deployment" {
-			found = true
-			if d.Regions["prod-us"] != "Synced" || d.Regions["prod-ir"] != "OutOfSync" {
-				t.Errorf("unexpected region map: %v", d.Regions)
-			}
-		}
-	}
-	if !found {
-		t.Error("expected a SYNC_DRIFT detail with Deployment resource reference")
-	}
+	as := domain.AppSet{Name: "myapp", Apps: []domain.AppInstance{
+		withResources(makeApp("myapp-prod-us", "prod-us"),
+			workload("Deployment", "myapp", "Synced", "Healthy")),
+		withResources(makeApp("myapp-prod-ir", "prod-ir"),
+			workload("Deployment", "myapp", "OutOfSync", "Healthy")),
+	}}
+	r := Detect([]domain.AppSet{as})[0]
+	assertDrift(t, r, domain.DriftSync)
+	assertRegions(t, r, domain.DriftSync, "Deployment", "myapp",
+		map[string]string{"prod-us": "Synced", "prod-ir": "OutOfSync"})
 }
 
 func TestDetect_StatefulSetOutOfSync(t *testing.T) {
-	as := domain.AppSet{
-		Name: "mydb",
-		Apps: []domain.AppInstance{
-			withResources(
-				makeApp("mydb-prod-us", "prod-us", "Synced", "Healthy"),
-				stsResource("mydb", "Synced", "Healthy"),
-			),
-			withResources(
-				makeApp("mydb-prod-ir", "prod-ir", "OutOfSync", "Healthy"),
-				stsResource("mydb", "OutOfSync", "Healthy"),
-			),
-		},
-	}
-	result := Detect([]domain.AppSet{as})
-	r := result[0]
-
-	if !ContainsDriftType(r.DriftTypes, domain.DriftSync) {
-		t.Errorf("expected SYNC_DRIFT in %v", r.DriftTypes)
-	}
+	as := domain.AppSet{Name: "mydb", Apps: []domain.AppInstance{
+		withResources(makeApp("mydb-prod-us", "prod-us"),
+			workload("StatefulSet", "mydb", "Synced", "Healthy")),
+		withResources(makeApp("mydb-prod-ir", "prod-ir"),
+			workload("StatefulSet", "mydb", "OutOfSync", "Healthy")),
+	}}
+	r := Detect([]domain.AppSet{as})[0]
+	assertDrift(t, r, domain.DriftSync)
 }
+
+func TestDetect_RolloutOutOfSync(t *testing.T) {
+	as := domain.AppSet{Name: "myapp", Apps: []domain.AppInstance{
+		withResources(makeApp("myapp-prod-us", "prod-us"),
+			workload("Rollout", "myapp", "Synced", "Healthy")),
+		withResources(makeApp("myapp-stg-us", "stg-us"),
+			workload("Rollout", "myapp", "OutOfSync", "Progressing")),
+	}}
+	r := Detect([]domain.AppSet{as})[0]
+	assertDrift(t, r, domain.DriftSync)
+}
+
+// ---- workload health drift ----
 
 func TestDetect_DeploymentDegraded(t *testing.T) {
-	as := domain.AppSet{
-		Name: "myapp",
-		Apps: []domain.AppInstance{
-			withResources(
-				makeApp("myapp-prod-us", "prod-us", "Synced", "Healthy"),
-				depResource("myapp", "Synced", "Healthy"),
-			),
-			withResources(
-				makeApp("myapp-prod-ir", "prod-ir", "Synced", "Degraded"),
-				depResource("myapp", "Synced", "Degraded"),
-			),
-		},
-	}
-	result := Detect([]domain.AppSet{as})
-	r := result[0]
-
-	if !r.DriftDetected {
-		t.Fatal("expected drift detected")
-	}
-	if !ContainsDriftType(r.DriftTypes, domain.DriftHealth) {
-		t.Errorf("expected HEALTH_DRIFT in %v", r.DriftTypes)
-	}
+	as := domain.AppSet{Name: "myapp", Apps: []domain.AppInstance{
+		withResources(makeApp("myapp-prod-us", "prod-us"),
+			workload("Deployment", "myapp", "Synced", "Healthy")),
+		withResources(makeApp("myapp-prod-ir", "prod-ir"),
+			workload("Deployment", "myapp", "Synced", "Degraded")),
+	}}
+	r := Detect([]domain.AppSet{as})[0]
+	assertDrift(t, r, domain.DriftHealth)
+	assertRegions(t, r, domain.DriftHealth, "Deployment", "myapp",
+		map[string]string{"prod-us": "Healthy", "prod-ir": "Degraded"})
 }
 
-func TestDetect_PDBDegraded(t *testing.T) {
-	as := domain.AppSet{
-		Name: "myapp",
-		Apps: []domain.AppInstance{
-			withResources(
-				makeApp("myapp-prod-us", "prod-us", "Synced", "Healthy"),
-				pdbResource("myapp-pdb", "Healthy"),
-			),
-			withResources(
-				makeApp("myapp-prod-ir", "prod-ir", "Synced", "Degraded"),
-				pdbResource("myapp-pdb", "Degraded"),
-			),
-		},
-	}
-	result := Detect([]domain.AppSet{as})
-	r := result[0]
+func TestDetect_RolloutProgressing_IsDrift(t *testing.T) {
+	// prod-us is Healthy; prod-ir is still Progressing — that is a health difference.
+	as := domain.AppSet{Name: "myapp", Apps: []domain.AppInstance{
+		withResources(makeApp("myapp-prod-us", "prod-us"),
+			workload("Rollout", "myapp", "Synced", "Healthy")),
+		withResources(makeApp("myapp-prod-ir", "prod-ir"),
+			workload("Rollout", "myapp", "Synced", "Progressing")),
+	}}
+	r := Detect([]domain.AppSet{as})[0]
+	assertDrift(t, r, domain.DriftHealth)
+}
 
-	if !r.DriftDetected {
-		t.Fatal("expected drift: PDB degraded in prod-ir")
-	}
-	if !ContainsDriftType(r.DriftTypes, domain.DriftHealth) {
-		t.Errorf("expected HEALTH_DRIFT in %v", r.DriftTypes)
-	}
+// ---- missing resource ----
 
-	// Verify PDB is the referenced resource
-	found := false
+func TestDetect_WorkloadMissingInRegion(t *testing.T) {
+	// prod-ir app has no Deployment resource reported — should appear as "Missing".
+	as := domain.AppSet{Name: "myapp", Apps: []domain.AppInstance{
+		withResources(makeApp("myapp-prod-us", "prod-us"),
+			workload("Deployment", "myapp", "Synced", "Healthy")),
+		makeApp("myapp-prod-ir", "prod-ir"), // no resources
+	}}
+	r := Detect([]domain.AppSet{as})[0]
+	assertDrift(t, r, domain.DriftSync)
+	assertDrift(t, r, domain.DriftHealth)
+
+	// Verify prod-ir is reported as Missing
 	for _, d := range r.DriftDetails {
-		if d.Type == domain.DriftHealth && d.Resource != nil && d.Resource.Kind == "PodDisruptionBudget" {
-			found = true
+		if d.Resource != nil && d.Resource.Kind == "Deployment" {
+			if d.Regions["prod-ir"] != "Missing" {
+				t.Errorf("expected prod-ir=Missing, got %q", d.Regions["prod-ir"])
+			}
 		}
 	}
-	if !found {
-		t.Error("expected a HEALTH_DRIFT detail with PodDisruptionBudget resource reference")
-	}
 }
 
-func TestDetect_Progressing_IsNotDrift(t *testing.T) {
-	// A Rollout in Progressing state (canary in flight) should not be flagged as drift.
-	as := domain.AppSet{
-		Name: "myapp",
-		Apps: []domain.AppInstance{
-			withResources(
-				makeApp("myapp-prod-us", "prod-us", "Synced", "Progressing"),
-				domain.ResourceStatus{Kind: "Rollout", Name: "myapp", SyncStatus: "Synced", HealthStatus: "Progressing"},
-			),
-			withResources(
-				makeApp("myapp-prod-ir", "prod-ir", "Synced", "Progressing"),
-				domain.ResourceStatus{Kind: "Rollout", Name: "myapp", SyncStatus: "Synced", HealthStatus: "Progressing"},
-			),
-		},
-	}
-	result := Detect([]domain.AppSet{as})
-	if result[0].DriftDetected {
-		t.Errorf("Progressing should not be drift, got types: %v", result[0].DriftTypes)
-	}
+// ---- non-workload resources are ignored ----
+
+func TestDetect_PDBIgnored(t *testing.T) {
+	as := domain.AppSet{Name: "myapp", Apps: []domain.AppInstance{
+		withResources(makeApp("myapp-prod-us", "prod-us"),
+			workload("Deployment", "myapp", "Synced", "Healthy"),
+			domain.ResourceStatus{Kind: "PodDisruptionBudget", Name: "myapp-pdb", HealthStatus: "Degraded"}),
+		withResources(makeApp("myapp-prod-ir", "prod-ir"),
+			workload("Deployment", "myapp", "Synced", "Healthy"),
+			domain.ResourceStatus{Kind: "PodDisruptionBudget", Name: "myapp-pdb", HealthStatus: "Healthy"}),
+	}}
+	r := Detect([]domain.AppSet{as})[0]
+	// PDB diff is ignored; Deployments are clean — no drift
+	assertNoDrift(t, r)
 }
+
+// ---- combined ----
 
 func TestDetect_MultipleDriftTypes(t *testing.T) {
-	as := domain.AppSet{
-		Name: "myapp",
-		Apps: []domain.AppInstance{
-			withResources(
-				makeApp("myapp-prod-us", "prod-us", "Synced", "Healthy", "gcr.io/proj/myapp:v1.2"),
-				depResource("myapp", "Synced", "Healthy"),
-			),
-			withResources(
-				makeApp("myapp-prod-ir", "prod-ir", "OutOfSync", "Degraded", "gcr.io/proj/myapp:v1.1"),
-				depResource("myapp", "OutOfSync", "Degraded"),
-			),
-		},
-	}
-	result := Detect([]domain.AppSet{as})
-	r := result[0]
+	as := domain.AppSet{Name: "myapp", Apps: []domain.AppInstance{
+		withResources(makeApp("myapp-prod-us", "prod-us", "gcr.io/proj/myapp:v1.2"),
+			workload("Deployment", "myapp", "Synced", "Healthy")),
+		withResources(makeApp("myapp-prod-ir", "prod-ir", "gcr.io/proj/myapp:v1.1"),
+			workload("Deployment", "myapp", "OutOfSync", "Degraded")),
+	}}
+	r := Detect([]domain.AppSet{as})[0]
+	assertDrift(t, r, domain.DriftImageTag)
+	assertDrift(t, r, domain.DriftSync)
+	assertDrift(t, r, domain.DriftHealth)
+}
 
+// ---- assertion helpers ----
+
+func assertDrift(t *testing.T, r domain.AppSet, driftType string) {
+	t.Helper()
 	if !r.DriftDetected {
-		t.Fatal("expected drift detected")
+		t.Fatalf("expected drift_detected=true, got false (types: %v)", r.DriftTypes)
 	}
-	for _, want := range []string{domain.DriftImageTag, domain.DriftSync, domain.DriftHealth} {
-		if !ContainsDriftType(r.DriftTypes, want) {
-			t.Errorf("expected %s in %v", want, r.DriftTypes)
+	if !ContainsDriftType(r.DriftTypes, driftType) {
+		t.Errorf("expected %s in drift_types %v", driftType, r.DriftTypes)
+	}
+}
+
+func assertNoDrift(t *testing.T, r domain.AppSet) {
+	t.Helper()
+	if r.DriftDetected {
+		t.Errorf("expected no drift, got types: %v", r.DriftTypes)
+	}
+}
+
+func assertRegions(t *testing.T, r domain.AppSet, driftType, kind, name string, want map[string]string) {
+	t.Helper()
+	for _, d := range r.DriftDetails {
+		if d.Type != driftType || d.Resource == nil {
+			continue
 		}
+		if d.Resource.Kind != kind || d.Resource.Name != name {
+			continue
+		}
+		for region, wantVal := range want {
+			if got := d.Regions[region]; got != wantVal {
+				t.Errorf("region %q: got %q want %q", region, got, wantVal)
+			}
+		}
+		return
 	}
+	t.Errorf("no %s detail found for %s/%s", driftType, kind, name)
 }
