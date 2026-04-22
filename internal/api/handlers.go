@@ -25,6 +25,8 @@ func NewHandler(cfg config.Config) *Handler {
 
 // ---- request / response helpers ----
 
+// analyzeRequest is the POST /analyze body. ArgocdURL and Token are optional
+// overrides; if omitted, the server's configured defaults are used.
 type analyzeRequest struct {
 	ArgocdURL string `json:"argocd_url"`
 	Token     string `json:"token"`
@@ -32,8 +34,8 @@ type analyzeRequest struct {
 }
 
 type errorResponse struct {
-	Error   string `json:"error"`
-	Code    string `json:"code"`
+	Error string `json:"error"`
+	Code  string `json:"code"`
 }
 
 func respondJSON(w http.ResponseWriter, status int, v any) {
@@ -56,22 +58,25 @@ func (h *Handler) Healthz(w http.ResponseWriter, r *http.Request) {
 // Analyze runs a full drift analysis for a project and returns the report.
 //
 //	POST /api/v1/analyze
+//	Body: { "project": "platform" }
+//	      { "project": "platform", "argocd_url": "...", "token": "..." }  (override)
 func (h *Handler) Analyze(w http.ResponseWriter, r *http.Request) {
 	var req analyzeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		respondError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid JSON body")
 		return
 	}
-	if req.ArgocdURL == "" || req.Token == "" || req.Project == "" {
-		respondError(w, http.StatusBadRequest, "INVALID_REQUEST", "argocd_url, token, and project are required")
+	if req.Project == "" {
+		respondError(w, http.StatusBadRequest, "INVALID_REQUEST", "project is required")
 		return
 	}
 
-	report, err := analysis.Run(r.Context(), req.ArgocdURL, req.Token, req.Project, analysis.Config{
-		TLSSkipVerify: h.cfg.ArgoTLSSkipVerify,
-		HTTPTimeout:   h.cfg.ArgoHTTPTimeout,
-		MaxApps:       h.cfg.ArgoMaxApps,
-	})
+	argoURL, token, ok := h.resolveCredentials(w, req.ArgocdURL, req.Token)
+	if !ok {
+		return
+	}
+
+	report, err := analysis.Run(r.Context(), argoURL, token, req.Project, h.analysisCfg())
 	if err != nil {
 		handleArgoError(w, err)
 		return
@@ -83,16 +88,12 @@ func (h *Handler) Analyze(w http.ResponseWriter, r *http.Request) {
 //
 //	GET /api/v1/analyze/{project}/appsets
 func (h *Handler) ListAppSets(w http.ResponseWriter, r *http.Request) {
-	req, ok := h.appSetRequest(w, r)
+	project, argoURL, token, ok := h.projectRequest(w, r)
 	if !ok {
 		return
 	}
 
-	report, err := analysis.Run(r.Context(), req.ArgocdURL, req.Token, req.Project, analysis.Config{
-		TLSSkipVerify: h.cfg.ArgoTLSSkipVerify,
-		HTTPTimeout:   h.cfg.ArgoHTTPTimeout,
-		MaxApps:       h.cfg.ArgoMaxApps,
-	})
+	report, err := analysis.Run(r.Context(), argoURL, token, project, h.analysisCfg())
 	if err != nil {
 		handleArgoError(w, err)
 		return
@@ -106,12 +107,11 @@ func (h *Handler) ListAppSets(w http.ResponseWriter, r *http.Request) {
 	}
 	summaries := make([]appSetSummary, 0, len(report.AppSets))
 	for _, as := range report.AppSets {
-		regions := uniqueRegions(as.Apps)
 		summaries = append(summaries, appSetSummary{
 			Name:          as.Name,
 			DriftDetected: as.DriftDetected,
 			DriftTypes:    as.DriftTypes,
-			Regions:       regions,
+			Regions:       uniqueRegions(as.Apps),
 		})
 	}
 	respondJSON(w, http.StatusOK, map[string]any{
@@ -124,17 +124,13 @@ func (h *Handler) ListAppSets(w http.ResponseWriter, r *http.Request) {
 //
 //	GET /api/v1/analyze/{project}/appsets/{appset}
 func (h *Handler) GetAppSet(w http.ResponseWriter, r *http.Request) {
-	appSetName := chi.URLParam(r, "appset")
-	req, ok := h.appSetRequest(w, r)
+	project, argoURL, token, ok := h.projectRequest(w, r)
 	if !ok {
 		return
 	}
+	appSetName := chi.URLParam(r, "appset")
 
-	report, err := analysis.Run(r.Context(), req.ArgocdURL, req.Token, req.Project, analysis.Config{
-		TLSSkipVerify: h.cfg.ArgoTLSSkipVerify,
-		HTTPTimeout:   h.cfg.ArgoHTTPTimeout,
-		MaxApps:       h.cfg.ArgoMaxApps,
-	})
+	report, err := analysis.Run(r.Context(), argoURL, token, project, h.analysisCfg())
 	if err != nil {
 		handleArgoError(w, err)
 		return
@@ -153,17 +149,13 @@ func (h *Handler) GetAppSet(w http.ResponseWriter, r *http.Request) {
 //
 //	GET /api/v1/analyze/{project}/drift?drift_type=IMAGE_TAG_DRIFT
 func (h *Handler) ListDrift(w http.ResponseWriter, r *http.Request) {
-	req, ok := h.appSetRequest(w, r)
+	project, argoURL, token, ok := h.projectRequest(w, r)
 	if !ok {
 		return
 	}
 	filterType := r.URL.Query().Get("drift_type")
 
-	report, err := analysis.Run(r.Context(), req.ArgocdURL, req.Token, req.Project, analysis.Config{
-		TLSSkipVerify: h.cfg.ArgoTLSSkipVerify,
-		HTTPTimeout:   h.cfg.ArgoHTTPTimeout,
-		MaxApps:       h.cfg.ArgoMaxApps,
-	})
+	report, err := analysis.Run(r.Context(), argoURL, token, project, h.analysisCfg())
 	if err != nil {
 		handleArgoError(w, err)
 		return
@@ -187,34 +179,44 @@ func (h *Handler) ListDrift(w http.ResponseWriter, r *http.Request) {
 
 // ---- helpers ----
 
-// appSetRequest extracts the project from the URL param and the ArgoCD
-// credentials from query params or Authorization header.
-func (h *Handler) appSetRequest(w http.ResponseWriter, r *http.Request) (analyzeRequest, bool) {
-	project := chi.URLParam(r, "project")
+// projectRequest extracts the project URL param and the server-level credentials.
+// It returns (project, argoURL, token, ok).
+func (h *Handler) projectRequest(w http.ResponseWriter, r *http.Request) (project, argoURL, token string, ok bool) {
+	project = chi.URLParam(r, "project")
 	if project == "" {
 		respondError(w, http.StatusBadRequest, "INVALID_REQUEST", "project is required")
-		return analyzeRequest{}, false
+		return
 	}
+	argoURL, token, ok = h.resolveCredentials(w, "", "")
+	return
+}
 
-	// Credentials: prefer query params, fall back to headers.
-	argoURL := r.URL.Query().Get("argocd_url")
-	token := r.URL.Query().Get("token")
-
+// resolveCredentials returns credentials to use for an ArgoCD call.
+// Request-level values (from POST body) take precedence over server defaults.
+// Returns false and writes an error response if no credentials are available.
+func (h *Handler) resolveCredentials(w http.ResponseWriter, reqURL, reqToken string) (argoURL, token string, ok bool) {
+	argoURL = reqURL
 	if argoURL == "" {
-		argoURL = r.Header.Get("X-ArgoCD-URL")
+		argoURL = h.cfg.ArgoURL
 	}
+	token = reqToken
 	if token == "" {
-		if auth := r.Header.Get("Authorization"); len(auth) > 7 {
-			token = auth[7:] // strip "Bearer "
-		}
+		token = h.cfg.ArgoToken
 	}
-
 	if argoURL == "" || token == "" {
-		respondError(w, http.StatusBadRequest, "INVALID_REQUEST",
-			"provide argocd_url and token as query params or X-ArgoCD-URL / Authorization headers")
-		return analyzeRequest{}, false
+		respondError(w, http.StatusInternalServerError, "MISCONFIGURED",
+			"server is missing ARGOCD_URL or ARGOCD_TOKEN — set them as environment variables")
+		return "", "", false
 	}
-	return analyzeRequest{ArgocdURL: argoURL, Token: token, Project: project}, true
+	return argoURL, token, true
+}
+
+func (h *Handler) analysisCfg() analysis.Config {
+	return analysis.Config{
+		TLSSkipVerify: h.cfg.ArgoTLSSkipVerify,
+		HTTPTimeout:   h.cfg.ArgoHTTPTimeout,
+		MaxApps:       h.cfg.ArgoMaxApps,
+	}
 }
 
 func handleArgoError(w http.ResponseWriter, err error) {
@@ -244,4 +246,3 @@ func uniqueRegions(apps []domain.AppInstance) []string {
 	}
 	return out
 }
-

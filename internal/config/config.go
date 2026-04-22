@@ -12,6 +12,12 @@ type Config struct {
 	ReadTimeout  time.Duration
 	WriteTimeout time.Duration
 
+	// ArgoURL and ArgoToken are the default ArgoCD credentials used by all
+	// GET endpoints. The POST /analyze body can override them for multi-ArgoCD
+	// setups, but these must be set for the server to be useful.
+	ArgoURL   string
+	ArgoToken string
+
 	ArgoTLSSkipVerify bool
 	ArgoHTTPTimeout   time.Duration
 	ArgoMaxApps       int
@@ -24,6 +30,9 @@ func Load() Config {
 		Port:         envInt("PORT", 8080),
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 30 * time.Second,
+
+		ArgoURL:   os.Getenv("ARGOCD_URL"),
+		ArgoToken: os.Getenv("ARGOCD_TOKEN"),
 
 		ArgoTLSSkipVerify: envBool("ARGOCD_TLS_SKIP_VERIFY", false),
 		ArgoHTTPTimeout:   envDuration("ARGOCD_HTTP_TIMEOUT", 15*time.Second),
