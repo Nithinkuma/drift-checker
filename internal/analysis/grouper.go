@@ -3,6 +3,7 @@ package analysis
 import (
 	"log/slog"
 	"net/url"
+	"strings"
 
 	"github.com/nithinkuma/drift-checker/internal/argocd"
 	"github.com/nithinkuma/drift-checker/internal/domain"
@@ -30,19 +31,26 @@ func Group(
 		appSetMap[raw.Metadata.Name] = as
 	}
 
-	labelMissing, labelFound, appsetMissing := 0, 0, 0
+	labelFound, ownerFound, nameFound, unmatched, stubs := 0, 0, 0, 0, 0
 	for _, app := range rawApps {
-		parentName := app.Metadata.Labels[appSetLabelKey]
+		method, parentName := resolveAppSetName(app, byServer, byName)
 		if parentName == "" {
-			labelMissing++
-			continue // standalone app, not managed by an AppSet
+			unmatched++
+			continue
 		}
-		labelFound++
+
+		switch method {
+		case "label":
+			labelFound++
+		case "owner":
+			ownerFound++
+		case "name":
+			nameFound++
+		}
+
 		as, ok := appSetMap[parentName]
 		if !ok {
-			// AppSet wasn't returned by the API (e.g. different namespace or
-			// project filter gap) — create a stub entry so the app isn't lost.
-			appsetMissing++
+			stubs++
 			stub := &domain.AppSet{Name: parentName}
 			appSetMap[parentName] = stub
 			as = stub
@@ -52,9 +60,11 @@ func Group(
 		as.Apps = append(as.Apps, instance)
 	}
 	slog.Info("grouper stats",
-		"apps_with_appset_label", labelFound,
-		"apps_without_label", labelMissing,
-		"appset_stubs_created", appsetMissing,
+		"via_label", labelFound,
+		"via_owner_ref", ownerFound,
+		"via_name_strip", nameFound,
+		"unmatched_standalone", unmatched,
+		"appset_stubs_created", stubs,
 	)
 
 	result := make([]domain.AppSet, 0, len(appSetMap))
@@ -136,6 +146,65 @@ func resolveRegion(app argocd.Application, byServer, byName map[string]argocd.Cl
 	}
 
 	return "unknown"
+}
+
+// resolveAppSetName finds the parent ApplicationSet name for an app.
+// Priority: label → annotation → ownerReference → name-based strip.
+// Returns (method, name) so callers can log which path was used.
+func resolveAppSetName(app argocd.Application, byServer, byName map[string]argocd.Cluster) (method, name string) {
+	if v := app.Metadata.Labels[appSetLabelKey]; v != "" {
+		return "label", v
+	}
+	if v := app.Metadata.Annotations[appSetLabelKey]; v != "" {
+		return "owner", v
+	}
+	for _, ref := range app.Metadata.OwnerReferences {
+		if ref.Kind == "ApplicationSet" && ref.Name != "" {
+			return "owner", ref.Name
+		}
+	}
+	// Fallback: ApplicationSet templates commonly name apps as "{appset}-{cluster}".
+	// Try stripping the cluster name (or destination name) suffix.
+	if n := stripClusterSuffix(app, byServer, byName); n != "" {
+		return "name", n
+	}
+	return "", ""
+}
+
+// stripClusterSuffix tries to derive an AppSet name by removing the cluster
+// identifier from the end of the app name.
+// e.g. "payment-api-prod-us" with cluster "prod-us" → "payment-api"
+func stripClusterSuffix(app argocd.Application, byServer, byName map[string]argocd.Cluster) string {
+	appName := app.Metadata.Name
+
+	// Candidates: destination name, cluster name from index, hostname from server URL.
+	var candidates []string
+
+	destName := app.Spec.Destination.Name
+	if destName != "" {
+		candidates = append(candidates, destName)
+	}
+	if c, ok := byName[destName]; ok {
+		candidates = append(candidates, c.Name)
+	}
+	if server := app.Spec.Destination.Server; server != "" {
+		if c, ok := byServer[server]; ok {
+			candidates = append(candidates, c.Name)
+		}
+		if u, err := url.Parse(server); err == nil {
+			candidates = append(candidates, u.Hostname())
+		}
+	}
+
+	for _, suffix := range candidates {
+		if suffix == "" {
+			continue
+		}
+		if stripped := strings.TrimSuffix(appName, "-"+suffix); stripped != appName && stripped != "" {
+			return stripped
+		}
+	}
+	return ""
 }
 
 func buildClusterIndexes(clusters []argocd.Cluster) (byServer, byName map[string]argocd.Cluster) {
