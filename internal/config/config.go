@@ -21,6 +21,8 @@ type Config struct {
 	ArgoTLSSkipVerify bool
 	ArgoHTTPTimeout   time.Duration
 	ArgoMaxApps       int
+
+	DBPath string
 }
 
 // Load returns a Config populated from environment variables, falling back to
@@ -37,7 +39,16 @@ func Load() Config {
 		ArgoTLSSkipVerify: envBool("ARGOCD_TLS_SKIP_VERIFY", false),
 		ArgoHTTPTimeout:   envDuration("ARGOCD_HTTP_TIMEOUT", 15*time.Second),
 		ArgoMaxApps:       envInt("ARGOCD_MAX_APPS", 500),
+
+		DBPath: envString("DB_PATH", "drift-checker.db"),
 	}
+}
+
+func envString(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
 }
 
 func envInt(key string, def int) int {

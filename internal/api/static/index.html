@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Drift Checker</title>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --surface: #161b22;
+      --border: #30363d;
+      --text: #c9d1d9;
+      --muted: #8b949e;
+      --accent: #58a6ff;
+      --danger: #f85149;
+      --success: #3fb950;
+      --warning: #d29922;
+      --btn-bg: #21262d;
+      --btn-hover: #30363d;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 14px; }
+    header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 12px 24px; display: flex; align-items: center; gap: 16px; }
+    header h1 { font-size: 16px; font-weight: 600; color: var(--accent); }
+    header .muted { color: var(--muted); font-size: 12px; }
+    .container { max-width: 1200px; margin: 0 auto; padding: 24px; }
+    .controls { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; margin-bottom: 24px; }
+    .field { display: flex; flex-direction: column; gap: 4px; }
+    label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+    select, input { background: var(--surface); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 6px 10px; font-size: 14px; outline: none; min-width: 180px; }
+    select:focus, input:focus { border-color: var(--accent); }
+    button { background: var(--btn-bg); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 7px 14px; font-size: 14px; cursor: pointer; white-space: nowrap; }
+    button:hover { background: var(--btn-hover); }
+    button.primary { background: var(--accent); color: #0d1117; border-color: var(--accent); font-weight: 600; }
+    button.primary:hover { opacity: 0.85; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; margin-bottom: 24px; }
+    .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
+    .card .value { font-size: 28px; font-weight: 700; }
+    .card .label { color: var(--muted); font-size: 12px; margin-top: 4px; }
+    .card.drift .value { color: var(--danger); }
+    .card.ok .value { color: var(--success); }
+    .tabs { display: flex; gap: 0; border-bottom: 1px solid var(--border); margin-bottom: 16px; }
+    .tab { padding: 8px 16px; cursor: pointer; border-bottom: 2px solid transparent; color: var(--muted); font-size: 14px; }
+    .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+    .tab:hover { color: var(--text); }
+    .panel { display: none; }
+    .panel.active { display: block; }
+    .toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
+    .toolbar .spacer { flex: 1; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 600; }
+    .badge.drift { background: rgba(248,81,73,0.15); color: var(--danger); }
+    .badge.ok { background: rgba(63,185,80,0.15); color: var(--success); }
+    .badge.warn { background: rgba(210,153,34,0.15); color: var(--warning); }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th { background: var(--surface); color: var(--muted); font-weight: 500; text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+    td { padding: 7px 12px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: rgba(255,255,255,0.02); }
+    .tag { font-family: monospace; font-size: 12px; color: var(--accent); }
+    .missing { color: var(--muted); font-style: italic; }
+    .synced { color: var(--success); }
+    .out-of-sync { color: var(--warning); }
+    .healthy { color: var(--success); }
+    .degraded { color: var(--danger); }
+    .table-wrap { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; overflow: auto; }
+    .status-bar { font-size: 12px; color: var(--muted); margin-top: 8px; }
+    .alert { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px 20px; color: var(--muted); text-align: center; }
+    .alert.error { border-color: var(--danger); color: var(--danger); }
+    .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.6s linear infinite; vertical-align: middle; margin-right: 6px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+<header>
+  <h1>Drift Checker</h1>
+  <span class="muted">ArgoCD multi-cluster drift detection</span>
+</header>
+
+<div class="container">
+  <div class="controls">
+    <div class="field">
+      <label>Project</label>
+      <select id="projectSelect">
+        <option value="">— select or type below —</option>
+      </select>
+    </div>
+    <div class="field">
+      <label>Or enter project name</label>
+      <input type="text" id="projectInput" placeholder="e.g. my-service" />
+    </div>
+    <button class="primary" id="syncBtn" onclick="syncProject()">Sync from ArgoCD</button>
+    <button id="loadBtn" onclick="loadProject()">Load Data</button>
+  </div>
+
+  <div id="summary" class="cards" style="display:none"></div>
+
+  <div id="mainContent" style="display:none">
+    <div class="tabs">
+      <div class="tab active" onclick="switchTab('buildDiff')">Build Diffs</div>
+      <div class="tab" onclick="switchTab('resourceDiff')">Resource Diffs</div>
+      <div class="tab" onclick="switchTab('regions')">Regions</div>
+    </div>
+
+    <div id="buildDiff" class="panel active">
+      <div class="toolbar">
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+          <input type="checkbox" id="buildAllCheck" onchange="renderBuildDiff()"> Show all (including non-drifted)
+        </label>
+        <div class="spacer"></div>
+        <button onclick="downloadCSV('builds')">Download CSV</button>
+      </div>
+      <div class="table-wrap" id="buildDiffTable"></div>
+      <div class="status-bar" id="buildDiffStatus"></div>
+    </div>
+
+    <div id="resourceDiff" class="panel">
+      <div class="toolbar">
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+          <input type="checkbox" id="resAllCheck" onchange="renderResourceDiff()"> Show all (including non-drifted)
+        </label>
+        <div class="spacer"></div>
+        <button onclick="downloadCSV('resources')">Download CSV</button>
+      </div>
+      <div class="table-wrap" id="resourceDiffTable"></div>
+      <div class="status-bar" id="resourceDiffStatus"></div>
+    </div>
+
+    <div id="regions" class="panel">
+      <div class="table-wrap" id="regionsTable"></div>
+    </div>
+  </div>
+
+  <div id="messageBox"></div>
+</div>
+
+<script>
+  let state = {
+    project: '',
+    buildDiffs: [],
+    resourceDiffs: [],
+    regionRows: [],
+    syncedAt: null,
+  };
+
+  async function init() {
+    try {
+      const resp = await fetch('/api/v1/projects');
+      const data = await resp.json();
+      const sel = document.getElementById('projectSelect');
+      (data.projects || []).forEach(p => {
+        const opt = document.createElement('option');
+        opt.value = p;
+        opt.textContent = p;
+        sel.appendChild(opt);
+      });
+    } catch (e) { /* ignore */ }
+  }
+
+  function activeProject() {
+    const input = document.getElementById('projectInput').value.trim();
+    const sel = document.getElementById('projectSelect').value;
+    return input || sel;
+  }
+
+  function showMessage(msg, type) {
+    const box = document.getElementById('messageBox');
+    box.innerHTML = `<div class="alert ${type || ''}" style="margin-top:16px">${msg}</div>`;
+  }
+
+  function clearMessage() {
+    document.getElementById('messageBox').innerHTML = '';
+  }
+
+  async function syncProject() {
+    const project = activeProject();
+    if (!project) { showMessage('Enter or select a project first.', 'error'); return; }
+    const btn = document.getElementById('syncBtn');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span>Syncing…';
+    clearMessage();
+    try {
+      const resp = await fetch(`/api/v1/${encodeURIComponent(project)}/sync`, { method: 'POST' });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || resp.statusText);
+      state.syncedAt = data.synced_at;
+      await loadProject();
+    } catch (e) {
+      showMessage('Sync failed: ' + e.message, 'error');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Sync from ArgoCD';
+    }
+  }
+
+  async function loadProject() {
+    const project = activeProject();
+    if (!project) { showMessage('Enter or select a project first.', 'error'); return; }
+    state.project = project;
+    clearMessage();
+
+    const btn = document.getElementById('loadBtn');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span>Loading…';
+
+    try {
+      const [buildResp, resResp, regResp] = await Promise.all([
+        fetch(`/api/v1/${encodeURIComponent(project)}/diff/builds?all=true`),
+        fetch(`/api/v1/${encodeURIComponent(project)}/diff/resources?all=true`),
+        fetch(`/api/v1/${encodeURIComponent(project)}/regions`),
+      ]);
+
+      if (!buildResp.ok) {
+        const d = await buildResp.json();
+        throw new Error(d.error || buildResp.statusText);
+      }
+
+      const [buildData, resData, regData] = await Promise.all([
+        buildResp.json(), resResp.json(), regResp.json()
+      ]);
+
+      state.buildDiffs = buildData.diffs || [];
+      state.resourceDiffs = resData.diffs || [];
+      state.regionRows = regData.rows || [];
+
+      renderSummary();
+      renderBuildDiff();
+      renderResourceDiff();
+      renderRegions();
+
+      document.getElementById('summary').style.display = 'grid';
+      document.getElementById('mainContent').style.display = 'block';
+    } catch (e) {
+      showMessage(e.message, 'error');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Load Data';
+    }
+  }
+
+  function renderSummary() {
+    const driftedBuilds = state.buildDiffs.filter(d => d.has_diff).length;
+    const driftedRes = state.resourceDiffs.filter(d => d.has_diff).length;
+    const regions = new Set(state.regionRows.map(r => r.region)).size;
+    const appsets = new Set(state.buildDiffs.map(d => d.appset)).size
+      || new Set(state.resourceDiffs.map(d => d.appset)).size;
+
+    const summaryEl = document.getElementById('summary');
+    summaryEl.innerHTML = `
+      <div class="card"><div class="value">${regions}</div><div class="label">Regions</div></div>
+      <div class="card"><div class="value">${appsets}</div><div class="label">AppSets</div></div>
+      <div class="card ${driftedBuilds > 0 ? 'drift' : 'ok'}">
+        <div class="value">${driftedBuilds}</div><div class="label">Build Drifts</div>
+      </div>
+      <div class="card ${driftedRes > 0 ? 'drift' : 'ok'}">
+        <div class="value">${driftedRes}</div><div class="label">Resource Drifts</div>
+      </div>
+    `;
+    if (state.syncedAt) {
+      summaryEl.innerHTML += `<div class="card"><div class="value" style="font-size:13px">${new Date(state.syncedAt).toLocaleString()}</div><div class="label">Last Synced</div></div>`;
+    }
+  }
+
+  function renderBuildDiff() {
+    const showAll = document.getElementById('buildAllCheck').checked;
+    const diffs = showAll ? state.buildDiffs : state.buildDiffs.filter(d => d.has_diff);
+
+    if (!diffs.length) {
+      document.getElementById('buildDiffTable').innerHTML = '<div class="alert" style="border:none">No drift detected</div>';
+      document.getElementById('buildDiffStatus').textContent = '';
+      return;
+    }
+
+    const regions = allRegions(diffs.map(d => d.regions));
+    let html = '<table><thead><tr><th>AppSet</th><th>Repository</th><th>Drift</th>';
+    regions.forEach(r => { html += `<th>${r}</th>`; });
+    html += '</tr></thead><tbody>';
+
+    diffs.forEach(d => {
+      html += `<tr><td>${d.appset}</td><td class="tag">${d.repository}</td>`;
+      html += `<td>${d.has_diff ? '<span class="badge drift">drift</span>' : '<span class="badge ok">ok</span>'}</td>`;
+      regions.forEach(r => {
+        const tag = d.regions && d.regions[r];
+        html += tag ? `<td class="tag">${tag}</td>` : `<td class="missing">—</td>`;
+      });
+      html += '</tr>';
+    });
+
+    html += '</tbody></table>';
+    document.getElementById('buildDiffTable').innerHTML = html;
+    document.getElementById('buildDiffStatus').textContent =
+      `${diffs.length} row${diffs.length !== 1 ? 's' : ''}`;
+  }
+
+  function renderResourceDiff() {
+    const showAll = document.getElementById('resAllCheck').checked;
+    const diffs = showAll ? state.resourceDiffs : state.resourceDiffs.filter(d => d.has_diff);
+
+    if (!diffs.length) {
+      document.getElementById('resourceDiffTable').innerHTML = '<div class="alert" style="border:none">No drift detected</div>';
+      document.getElementById('resourceDiffStatus').textContent = '';
+      return;
+    }
+
+    const regions = allRegions(diffs.map(d => d.sync));
+    let html = '<table><thead><tr><th>AppSet</th><th>Kind</th><th>Name</th><th>Drift</th>';
+    regions.forEach(r => { html += `<th>sync:${r}</th>`; });
+    regions.forEach(r => { html += `<th>health:${r}</th>`; });
+    html += '</tr></thead><tbody>';
+
+    diffs.forEach(d => {
+      html += `<tr><td>${d.appset}</td><td>${d.kind}</td><td>${d.name}</td>`;
+      html += `<td>${d.has_diff ? '<span class="badge drift">drift</span>' : '<span class="badge ok">ok</span>'}</td>`;
+      regions.forEach(r => {
+        const v = d.sync && d.sync[r] || '';
+        html += `<td class="${statusClass(v)}">${v || '—'}</td>`;
+      });
+      regions.forEach(r => {
+        const v = d.health && d.health[r] || '';
+        html += `<td class="${statusClass(v)}">${v || '—'}</td>`;
+      });
+      html += '</tr>';
+    });
+
+    html += '</tbody></table>';
+    document.getElementById('resourceDiffTable').innerHTML = html;
+    document.getElementById('resourceDiffStatus').textContent =
+      `${diffs.length} row${diffs.length !== 1 ? 's' : ''}`;
+  }
+
+  function renderRegions() {
+    const rows = state.regionRows;
+    if (!rows.length) {
+      document.getElementById('regionsTable').innerHTML = '<div class="alert" style="border:none">No data</div>';
+      return;
+    }
+
+    let html = '<table><thead><tr><th>AppSet</th><th>App</th><th>Region</th><th>Cluster</th><th>Namespace</th><th>Sync</th><th>Health</th></tr></thead><tbody>';
+    rows.forEach(r => {
+      html += `<tr>
+        <td>${r.appset}</td>
+        <td>${r.app_name}</td>
+        <td>${r.region}</td>
+        <td>${r.cluster_name}</td>
+        <td>${r.namespace}</td>
+        <td class="${statusClass(r.sync_status)}">${r.sync_status}</td>
+        <td class="${statusClass(r.health_status)}">${r.health_status}</td>
+      </tr>`;
+    });
+    html += '</tbody></table>';
+    document.getElementById('regionsTable').innerHTML = html;
+  }
+
+  function allRegions(maps) {
+    const seen = new Set();
+    maps.forEach(m => { if (m) Object.keys(m).forEach(k => seen.add(k)); });
+    return Array.from(seen).sort();
+  }
+
+  function statusClass(v) {
+    if (!v) return '';
+    const lv = v.toLowerCase();
+    if (lv === 'synced') return 'synced';
+    if (lv === 'outofsync' || lv === 'out of sync') return 'out-of-sync';
+    if (lv === 'healthy') return 'healthy';
+    if (lv === 'degraded' || lv === 'missing') return 'degraded';
+    return '';
+  }
+
+  function switchTab(name) {
+    document.querySelectorAll('.tab').forEach((t, i) => {
+      const names = ['buildDiff', 'resourceDiff', 'regions'];
+      t.classList.toggle('active', names[i] === name);
+    });
+    document.querySelectorAll('.panel').forEach(p => {
+      p.classList.toggle('active', p.id === name);
+    });
+  }
+
+  function downloadCSV(type) {
+    const project = state.project;
+    if (!project) return;
+    const showAll = type === 'builds'
+      ? document.getElementById('buildAllCheck').checked
+      : document.getElementById('resAllCheck').checked;
+    const url = `/api/v1/${encodeURIComponent(project)}/diff/${type}?format=csv${showAll ? '&all=true' : ''}`;
+    window.location.href = url;
+  }
+
+  init();
+</script>
+</body>
+</html>

@@ -13,19 +13,26 @@ import (
 
 	"github.com/nithinkuma/drift-checker/internal/api"
 	"github.com/nithinkuma/drift-checker/internal/config"
+	"github.com/nithinkuma/drift-checker/internal/store"
 )
 
 func main() {
 	cfg := config.Load()
 
+	db, err := store.Open(cfg.DBPath)
+	if err != nil {
+		slog.Error("failed to open database", "path", cfg.DBPath, "err", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+
 	srv := &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.Port),
-		Handler:      api.NewRouter(cfg),
+		Handler:      api.NewRouter(cfg, db),
 		ReadTimeout:  cfg.ReadTimeout,
 		WriteTimeout: cfg.WriteTimeout,
 	}
 
-	// Start server in a goroutine so we can listen for shutdown signals.
 	go func() {
 		slog.Info("server starting", "addr", srv.Addr)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
