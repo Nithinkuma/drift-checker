@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -33,8 +34,8 @@ func Load() Config {
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 30 * time.Second,
 
-		ArgoURL:   os.Getenv("ARGOCD_URL"),
-		ArgoToken: os.Getenv("ARGOCD_TOKEN"),
+		ArgoURL:   strings.TrimSpace(os.Getenv("ARGOCD_URL")),
+		ArgoToken: strings.TrimSpace(os.Getenv("ARGOCD_TOKEN")),
 
 		ArgoTLSSkipVerify: envBool("ARGOCD_TLS_SKIP_VERIFY", false),
 		ArgoHTTPTimeout:   envDuration("ARGOCD_HTTP_TIMEOUT", 15*time.Second),

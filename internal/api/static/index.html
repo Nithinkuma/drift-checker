@@ -81,20 +81,14 @@
   <div class="controls">
     <div class="field">
       <label>ArgoCD Project <span style="font-size:11px;color:var(--muted);text-transform:none;letter-spacing:0">(AppProject name)</span></label>
-      <select id="projectSelect" onchange="onSelectChange()">
-        <option value="">— loading projects… —</option>
-      </select>
-    </div>
-    <div class="field" id="customField" style="display:none">
-      <label>Project name</label>
-      <input type="text" id="projectInput" placeholder="e.g. default" />
+      <input type="text" id="projectInput" list="projectList" placeholder="loading…" autocomplete="off" style="min-width:220px" />
+      <datalist id="projectList"></datalist>
     </div>
     <button class="primary" id="syncBtn" onclick="syncProject()">Sync from ArgoCD</button>
     <button id="loadBtn" onclick="loadProject()">Load Data</button>
   </div>
-  <div id="projectHint" style="font-size:12px;color:var(--muted);margin-bottom:16px;display:none">
-    Select a project from the dropdown, then click <strong style="color:var(--text)">Sync from ArgoCD</strong> to fetch live data.
-    Previously synced projects are marked with ✓.
+  <div id="projectHint" style="font-size:12px;color:var(--muted);margin-bottom:16px;">
+    Type or pick a project, then <strong style="color:var(--text)">Sync from ArgoCD</strong> to fetch live data. Previously synced projects are marked with ✓.
   </div>
 
   <div id="summary" class="cards" style="display:none"></div>
@@ -148,9 +142,10 @@
   };
 
   async function init() {
-    const sel = document.getElementById('projectSelect');
+    const input = document.getElementById('projectInput');
+    const datalist = document.getElementById('projectList');
+    const prev = input.value;
 
-    // Fetch both synced projects (local DB) and live ArgoCD projects in parallel.
     const [syncedRes, argoRes] = await Promise.allSettled([
       fetch('/api/v1/projects').then(r => r.json()),
       fetch('/api/v1/argocd/projects').then(r => r.json()),
@@ -158,55 +153,27 @@
 
     const synced = new Set(syncedRes.status === 'fulfilled' ? (syncedRes.value.projects || []) : []);
     const argoProjects = argoRes.status === 'fulfilled' ? (argoRes.value.projects || []) : [];
+    const all = Array.from(new Set([...argoProjects, ...synced])).sort();
 
-    // Merge: ArgoCD projects + any synced ones not in ArgoCD (e.g. stale)
-    const all = new Set([...argoProjects, ...synced]);
-    const sorted = Array.from(all).sort();
+    datalist.innerHTML = '';
+    all.forEach(p => {
+      const opt = document.createElement('option');
+      opt.value = p;
+      opt.label = synced.has(p) ? '(synced)' : '';
+      datalist.appendChild(opt);
+    });
 
-    sel.innerHTML = '';
-    if (sorted.length === 0) {
-      // ArgoCD not reachable — fall back to manual input
-      sel.innerHTML = '<option value="__custom__">Enter project name manually…</option>';
-      document.getElementById('customField').style.display = '';
-      document.getElementById('projectHint').style.display = 'none';
-    } else {
-      sel.innerHTML = '<option value="">— select a project —</option>';
-      sorted.forEach(p => {
-        const opt = document.createElement('option');
-        opt.value = p;
-        opt.textContent = synced.has(p) ? `✓ ${p}` : p;
-        sel.appendChild(opt);
-      });
-      const custom = document.createElement('option');
-      custom.value = '__custom__';
-      custom.textContent = 'Other…';
-      sel.appendChild(custom);
-      document.getElementById('projectHint').style.display = '';
+    if (prev) {
+      input.value = prev; // restore after sync refresh
+    } else if (all.length === 1) {
+      input.value = all[0];
     }
 
-    // Auto-select if only one option
-    if (sorted.length === 1) {
-      sel.value = sorted[0];
-    }
-  }
-
-  function onSelectChange() {
-    const sel = document.getElementById('projectSelect');
-    const customField = document.getElementById('customField');
-    if (sel.value === '__custom__') {
-      customField.style.display = '';
-      document.getElementById('projectInput').focus();
-    } else {
-      customField.style.display = 'none';
-    }
+    input.placeholder = all.length > 0 ? 'type or pick a project…' : 'e.g. default';
   }
 
   function activeProject() {
-    const sel = document.getElementById('projectSelect');
-    if (sel.value === '__custom__' || sel.value === '') {
-      return document.getElementById('projectInput').value.trim();
-    }
-    return sel.value;
+    return document.getElementById('projectInput').value.trim();
   }
 
   function showMessage(msg, type) {
@@ -230,8 +197,7 @@
       const data = await resp.json();
       if (!resp.ok) throw new Error(data.error || resp.statusText);
       state.syncedAt = data.synced_at;
-      await init(); // refresh dropdown so project gets ✓ mark
-      document.getElementById('projectSelect').value = project;
+      await init(); // refresh datalist so project shows (synced)
       await loadProject();
     } catch (e) {
       showMessage('Sync failed: ' + e.message, 'error');
