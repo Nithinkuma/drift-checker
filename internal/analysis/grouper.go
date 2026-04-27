@@ -1,6 +1,7 @@
 package analysis
 
 import (
+	"log/slog"
 	"net/url"
 
 	"github.com/nithinkuma/drift-checker/internal/argocd"
@@ -29,19 +30,32 @@ func Group(
 		appSetMap[raw.Metadata.Name] = as
 	}
 
+	labelMissing, labelFound, appsetMissing := 0, 0, 0
 	for _, app := range rawApps {
 		parentName := app.Metadata.Labels[appSetLabelKey]
 		if parentName == "" {
+			labelMissing++
 			continue // standalone app, not managed by an AppSet
 		}
+		labelFound++
 		as, ok := appSetMap[parentName]
 		if !ok {
-			continue // belongs to an AppSet in a different project
+			// AppSet wasn't returned by the API (e.g. different namespace or
+			// project filter gap) — create a stub entry so the app isn't lost.
+			appsetMissing++
+			stub := &domain.AppSet{Name: parentName}
+			appSetMap[parentName] = stub
+			as = stub
 		}
 
 		instance := buildInstance(app, byServer, byName)
 		as.Apps = append(as.Apps, instance)
 	}
+	slog.Info("grouper stats",
+		"apps_with_appset_label", labelFound,
+		"apps_without_label", labelMissing,
+		"appset_stubs_created", appsetMissing,
+	)
 
 	result := make([]domain.AppSet, 0, len(appSetMap))
 	for _, as := range appSetMap {

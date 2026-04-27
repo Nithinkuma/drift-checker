@@ -82,11 +82,12 @@ func (c *Client) get(ctx context.Context, path string, out any) error {
 	return nil
 }
 
-// ListApplicationSets returns all ApplicationSets for a project.
-func (c *Client) ListApplicationSets(ctx context.Context, project string) ([]ApplicationSet, error) {
-	path := "/api/v1/applicationsets?projects=" + url.QueryEscape(project)
+// ListApplicationSets returns all ApplicationSets visible to the token.
+// The ArgoCD ApplicationSet API does not reliably filter by project, so we
+// fetch everything and let the grouper scope by the apps' project filter.
+func (c *Client) ListApplicationSets(ctx context.Context) ([]ApplicationSet, error) {
 	var list ApplicationSetList
-	if err := c.get(ctx, path, &list); err != nil {
+	if err := c.get(ctx, "/api/v1/applicationsets", &list); err != nil {
 		return nil, fmt.Errorf("list applicationsets: %w", err)
 	}
 	return list.Items, nil

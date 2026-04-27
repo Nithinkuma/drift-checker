@@ -2,6 +2,7 @@ package analysis
 
 import (
 	"context"
+	"log/slog"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -37,7 +38,7 @@ func Run(ctx context.Context, argoURL, token, project string, cfg Config) (domai
 
 	eg.Go(func() error {
 		var err error
-		rawAppSets, err = client.ListApplicationSets(egCtx, project)
+		rawAppSets, err = client.ListApplicationSets(egCtx)
 		return err
 	})
 	eg.Go(func() error {
@@ -55,7 +56,15 @@ func Run(ctx context.Context, argoURL, token, project string, cfg Config) (domai
 		return domain.AnalysisReport{}, err
 	}
 
+	slog.Info("argocd fetch complete",
+		"project", project,
+		"appsets", len(rawAppSets),
+		"apps", len(rawApps),
+		"clusters", len(clusters),
+	)
+
 	appsets := Group(rawAppSets, rawApps, clusters)
+	slog.Info("grouping complete", "project", project, "grouped_appsets", len(appsets))
 	appsets = Detect(appsets)
 
 	report := buildReport(project, appsets)
