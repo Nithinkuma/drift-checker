@@ -52,6 +52,25 @@ func (h *Handler) Healthz(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+// ArgoProjects lists all AppProject names from ArgoCD directly.
+// Used by the UI to populate the project dropdown without requiring the user
+// to know project names in advance.
+//
+//	GET /api/v1/argocd/projects
+func (h *Handler) ArgoProjects(w http.ResponseWriter, r *http.Request) {
+	argoURL, token, ok := h.resolveCredentials(w)
+	if !ok {
+		return
+	}
+	client := newArgoClient(argoURL, token, h.analysisCfg())
+	projects, err := client.ListProjects(r.Context())
+	if err != nil {
+		handleArgoError(w, err)
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]any{"projects": projects})
+}
+
 // Projects lists all projects that have been synced.
 //
 //	GET /api/v1/projects
@@ -258,6 +277,14 @@ func (h *Handler) analysisCfg() analysis.Config {
 		HTTPTimeout:   h.cfg.ArgoHTTPTimeout,
 		MaxApps:       h.cfg.ArgoMaxApps,
 	}
+}
+
+func newArgoClient(argoURL, token string, cfg analysis.Config) *argocd.Client {
+	return argocd.NewClient(argoURL, token, argocd.ClientConfig{
+		TLSSkipVerify: cfg.TLSSkipVerify,
+		Timeout:       cfg.HTTPTimeout,
+		MaxApps:       cfg.MaxApps,
+	})
 }
 
 func handleArgoError(w http.ResponseWriter, err error) {

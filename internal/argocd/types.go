@@ -28,6 +28,14 @@ type ClusterList struct {
 	Items []Cluster `json:"items"`
 }
 
+type AppProjectList struct {
+	Items []AppProject `json:"items"`
+}
+
+type AppProject struct {
+	Metadata ObjectMeta `json:"metadata"`
+}
+
 // ListMeta holds pagination fields from k8s-style list responses.
 type ListMeta struct {
 	Continue string `json:"continue"`

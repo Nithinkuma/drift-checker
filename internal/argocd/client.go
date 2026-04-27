@@ -126,3 +126,16 @@ func (c *Client) ListClusters(ctx context.Context) ([]Cluster, error) {
 	}
 	return list.Items, nil
 }
+
+// ListProjects returns all ArgoCD AppProject names.
+func (c *Client) ListProjects(ctx context.Context) ([]string, error) {
+	var list AppProjectList
+	if err := c.get(ctx, "/api/v1/projects", &list); err != nil {
+		return nil, fmt.Errorf("list projects: %w", err)
+	}
+	names := make([]string, 0, len(list.Items))
+	for _, p := range list.Items {
+		names = append(names, p.Metadata.Name)
+	}
+	return names, nil
+}

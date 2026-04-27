@@ -34,6 +34,7 @@ func NewRouter(cfg config.Config, db *store.Store) http.Handler {
 
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Get("/projects", h.Projects)
+		r.Get("/argocd/projects", h.ArgoProjects)
 
 		r.Route("/{project}", func(r chi.Router) {
 			r.Post("/sync", h.Sync)
