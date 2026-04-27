@@ -4,6 +4,9 @@ A Go service that connects to ArgoCD with a read-only token and tells you exactl
 where your multi-cluster deployments have drifted — wrong image tag in one region,
 an OutOfSync StatefulSet in another, a Rollout stuck mid-canary somewhere else.
 
+Data is fetched once via `POST /sync`, stored locally in SQLite, and served
+from the database on every subsequent read. A built-in web UI is available at `GET /`.
+
 ---
 
 ## Why
@@ -32,7 +35,7 @@ drift-checker reads that model and returns a structured diff.
 | Sync awareness | None | OutOfSync flagged per workload per region |
 | Silent re-tags | Invisible | IMAGE_DIGEST_DRIFT catches same tag, different digest |
 | Access required | k8s credentials per cluster | One ArgoCD read-only token |
-| Output | Unstructured text | JSON — pipe to jq, dashboards, alerting |
+| Output | Unstructured text | JSON, CSV, or web UI |
 
 ---
 
@@ -50,6 +53,10 @@ Workloads tracked: `Deployment`, `StatefulSet`, `Rollout` (Argo Rollouts),
 
 Health states surface verbatim from ArgoCD — `Degraded`, `Missing`,
 `Progressing`, etc. — so you see the real state, not a boolean.
+
+`Missing` means the workload did not appear in that region's resource list at
+all — the ArgoCD Application exists for that region but the workload was never
+created or was deleted from the cluster.
 
 ---
 
@@ -77,6 +84,10 @@ ARGOCD_TOKEN=eyJhbGciOiJSUzI1NiIsInR5... \
 # Server listening on :8080
 ```
 
+Open `http://localhost:8080` in your browser, enter your project name, and click
+**Sync from ArgoCD**. After the initial sync, data is served from the local
+SQLite database — no ArgoCD call is made on reads.
+
 ### Run with Docker
 
 ```bash
@@ -85,6 +96,8 @@ docker build -t drift-checker .
 docker run -p 8080:8080 \
   -e ARGOCD_URL=https://argocd.example.com \
   -e ARGOCD_TOKEN=eyJhbGciOiJSUzI1NiIsInR5... \
+  -v /data/drift-checker:/data \
+  -e DB_PATH=/data/drift-checker.db \
   drift-checker
 ```
 
@@ -99,9 +112,35 @@ All configuration is via environment variables. No config file is required.
 | `ARGOCD_URL` | — | ArgoCD base URL, no trailing slash. **Required.** |
 | `ARGOCD_TOKEN` | — | Read-only ArgoCD API token. **Required.** |
 | `PORT` | `8080` | HTTP port to listen on |
+| `DB_PATH` | `drift-checker.db` | Path to the SQLite database file |
 | `ARGOCD_TLS_SKIP_VERIFY` | `false` | Set `true` for self-signed certificates |
 | `ARGOCD_HTTP_TIMEOUT` | `15s` | Timeout for ArgoCD API calls (e.g. `20s`, `1m`) |
 | `ARGOCD_MAX_APPS` | `500` | Page size for application list pagination |
+
+---
+
+## How it works
+
+```
+POST /api/v1/{project}/sync
+        │
+        ▼
+  ArgoCD API ──► grouper ──► drift detector ──► SQLite
+                                                    │
+GET /api/v1/{project}/diff/builds  ◄────────────────┘
+GET /api/v1/{project}/diff/resources
+GET /api/v1/{project}/regions
+GET /api/v1/{project}/builds
+GET /api/v1/{project}/resources
+```
+
+1. **Sync** — `POST /api/v1/{project}/sync` fetches all Applications for the
+   project from ArgoCD, groups them by ApplicationSet, runs drift detection, and
+   writes the result to SQLite. This is the only call that touches ArgoCD.
+2. **Query** — all `GET` endpoints read from the SQLite database. Fast, no
+   ArgoCD dependency at read time.
+3. **Refresh** — call sync again whenever you want fresh data. The previous
+   snapshot is replaced atomically.
 
 ---
 
@@ -120,209 +159,205 @@ curl http://localhost:8080/healthz
 
 ---
 
-### Full analysis — POST
+### Web UI
 
 ```
-POST /api/v1/analyze
-Content-Type: application/json
+GET /
 ```
 
-Runs a complete drift analysis for a project. Returns every AppSet with
-per-region workload state and image comparison.
+Opens the embedded single-page UI in a browser. The UI provides:
+- Project selector (pre-populated with synced projects)
+- Sync button to fetch fresh data from ArgoCD
+- Summary cards: Regions, AppSets, Build Drifts, Resource Drifts, Last Synced
+- **Build Diffs** tab — image tag comparison across regions, with CSV download
+- **Resource Diffs** tab — sync and health state per workload per region, with CSV download
+- **Regions** tab — full region/cluster inventory
 
-The `argocd_url` and `token` fields in the body are optional — they override
-the server's environment variables. Useful when querying multiple ArgoCD
-instances from a single drift-checker deployment.
+---
 
-**Request**
+### List synced projects
+
+```
+GET /api/v1/projects
+```
+
+```bash
+curl http://localhost:8080/api/v1/projects
+```
 
 ```json
-{
-  "project": "platform"
-}
+{ "projects": ["platform", "data-platform"] }
 ```
 
-```json
-{
-  "project":    "platform",
-  "argocd_url": "https://other-argocd.example.com",
-  "token":      "eyJhbGci..."
-}
+---
+
+### Sync a project
+
+```
+POST /api/v1/{project}/sync
 ```
 
-**Response**
+Fetches live data from ArgoCD and writes it to the database. Returns a summary.
+This is the only endpoint that contacts ArgoCD.
+
+```bash
+curl -X POST http://localhost:8080/api/v1/platform/sync
+```
 
 ```json
 {
   "project": "platform",
-  "generated_at": "2026-04-22T10:00:00Z",
+  "synced_at": "2026-04-27T14:00:00Z",
   "summary": {
     "total_appsets": 12,
     "drifted_appsets": 3,
     "total_apps": 48
-  },
-  "appsets": [
+  }
+}
+```
+
+---
+
+### Build diff
+
+```
+GET /api/v1/{project}/diff/builds
+GET /api/v1/{project}/diff/builds?all=true          # include non-drifted rows
+GET /api/v1/{project}/diff/builds?appset=payment-api
+GET /api/v1/{project}/diff/builds?format=csv
+```
+
+Cross-region image tag comparison. By default only rows with `has_diff=true`
+are returned.
+
+```bash
+curl http://localhost:8080/api/v1/platform/diff/builds | jq .
+```
+
+```json
+{
+  "project": "platform",
+  "diffs": [
     {
-      "name": "payment-api",
-      "namespace": "argocd",
-      "drift_detected": true,
-      "drift_types": ["IMAGE_TAG_DRIFT", "SYNC_DRIFT"],
-      "apps": [
-        {
-          "name": "payment-api-prod-us",
-          "region": "prod-us",
-          "cluster_name": "prod-us-eks",
-          "sync_status": "Synced",
-          "health_status": "Healthy",
-          "revision": "a3f9c12b",
-          "images": [
-            {
-              "full": "gcr.io/myproject/payment-api:v2.1.0",
-              "registry": "gcr.io",
-              "repository": "myproject/payment-api",
-              "tag": "v2.1.0"
-            }
-          ],
-          "resources": [
-            {
-              "kind": "Deployment",
-              "name": "payment-api",
-              "sync_status": "Synced",
-              "health_status": "Healthy"
-            }
-          ]
-        },
-        {
-          "name": "payment-api-prod-ir",
-          "region": "prod-ir",
-          "cluster_name": "prod-ir-eks",
-          "sync_status": "OutOfSync",
-          "health_status": "Healthy",
-          "images": [
-            {
-              "full": "gcr.io/myproject/payment-api:v2.0.9",
-              "registry": "gcr.io",
-              "repository": "myproject/payment-api",
-              "tag": "v2.0.9"
-            }
-          ],
-          "resources": [
-            {
-              "kind": "Deployment",
-              "name": "payment-api",
-              "sync_status": "OutOfSync",
-              "health_status": "Healthy"
-            }
-          ]
-        }
-      ],
-      "drift_details": [
-        {
-          "type": "IMAGE_TAG_DRIFT",
-          "image_repository": "gcr.io/myproject/payment-api",
-          "message": "image tag mismatch across regions for gcr.io/myproject/payment-api",
-          "regions": {
-            "prod-us": "v2.1.0",
-            "prod-ir": "v2.0.9"
-          }
-        },
-        {
-          "type": "SYNC_DRIFT",
-          "resource": { "kind": "Deployment", "name": "payment-api" },
-          "message": "Deployment \"payment-api\" is not Synced in one or more regions",
-          "regions": {
-            "prod-us": "Synced",
-            "prod-ir": "OutOfSync"
-          }
-        }
-      ]
+      "appset": "payment-api",
+      "repository": "gcr.io/myproject/payment-api",
+      "has_diff": true,
+      "regions": {
+        "prod-us": "v2.1.0",
+        "prod-ir": "v2.0.9",
+        "stg-us":  "v2.1.0"
+      }
     }
   ]
 }
 ```
 
-**Example**
+CSV download (region names become dynamic columns):
 
 ```bash
-curl -s -X POST http://localhost:8080/api/v1/analyze \
-  -H "Content-Type: application/json" \
-  -d '{"project": "platform"}' | jq .
+curl "http://localhost:8080/api/v1/platform/diff/builds?format=csv" -o build-diff.csv
 ```
 
-Show only drifted AppSets:
-
-```bash
-curl -s -X POST http://localhost:8080/api/v1/analyze \
-  -H "Content-Type: application/json" \
-  -d '{"project": "platform"}' \
-  | jq '.appsets[] | select(.drift_detected)'
+```
+appset,repository,has_diff,prod-ir,prod-us,stg-us
+payment-api,gcr.io/myproject/payment-api,true,v2.0.9,v2.1.0,v2.1.0
 ```
 
 ---
 
-### List AppSets — GET
+### Resource diff
 
 ```
-GET /api/v1/analyze/{project}/appsets
+GET /api/v1/{project}/diff/resources
+GET /api/v1/{project}/diff/resources?all=true
+GET /api/v1/{project}/diff/resources?appset=payment-api
+GET /api/v1/{project}/diff/resources?format=csv
 ```
 
-Returns a summary of every AppSet in the project — name, drift flag, drift
-types, and which regions it is deployed in. Lighter than the full POST response.
+Cross-region workload sync and health state. By default only rows with
+`has_diff=true` are returned.
 
 ```bash
-curl -s http://localhost:8080/api/v1/analyze/platform/appsets | jq .
+curl http://localhost:8080/api/v1/platform/diff/resources | jq .
 ```
 
 ```json
 {
   "project": "platform",
-  "appsets": [
-    { "name": "payment-api", "drift_detected": true,  "drift_types": ["IMAGE_TAG_DRIFT"], "regions": ["prod-us","prod-ir","stg-us"] },
-    { "name": "worker",      "drift_detected": false, "regions": ["prod-us","prod-ir"] }
+  "diffs": [
+    {
+      "appset": "payment-api",
+      "kind": "Deployment",
+      "name": "payment-api",
+      "has_diff": true,
+      "sync": {
+        "prod-us": "Synced",
+        "prod-ir": "OutOfSync",
+        "stg-us":  "Synced"
+      },
+      "health": {
+        "prod-us": "Healthy",
+        "prod-ir": "Healthy",
+        "stg-us":  "Healthy"
+      }
+    }
   ]
 }
 ```
 
 ---
 
-### Single AppSet detail — GET
+### Region table
 
 ```
-GET /api/v1/analyze/{project}/appsets/{appset}
+GET /api/v1/{project}/regions
 ```
 
-Full detail for one AppSet — same shape as a single entry in the POST response.
+One row per Application (cluster deployment) — good for getting an inventory
+of what is deployed where and its overall ArgoCD health.
 
 ```bash
-curl -s http://localhost:8080/api/v1/analyze/platform/appsets/payment-api | jq .
+curl http://localhost:8080/api/v1/platform/regions | jq .
+```
+
+```json
+{
+  "project": "platform",
+  "rows": [
+    {
+      "appset": "payment-api",
+      "app_name": "payment-api-prod-us",
+      "region": "prod-us",
+      "cluster_name": "prod-us-eks",
+      "namespace": "payments",
+      "sync_status": "Synced",
+      "health_status": "Healthy"
+    }
+  ]
+}
 ```
 
 ---
 
-### Drifted AppSets only — GET
+### Build table
 
 ```
-GET /api/v1/analyze/{project}/drift
-GET /api/v1/analyze/{project}/drift?drift_type=IMAGE_TAG_DRIFT
+GET /api/v1/{project}/builds
 ```
 
-Returns only the AppSets that have drift, optionally filtered to a specific
-drift type. Useful for alerting pipelines that only care about image drift,
-or sync tooling that only looks at SYNC_DRIFT.
+One row per image per region per AppSet. Shows all running images across all
+clusters.
 
-```bash
-# All drifted appsets
-curl -s http://localhost:8080/api/v1/analyze/platform/drift | jq .
+---
 
-# Only image tag mismatches
-curl -s "http://localhost:8080/api/v1/analyze/platform/drift?drift_type=IMAGE_TAG_DRIFT" | jq .
+### Resource table
 
-# Only workloads stuck OutOfSync
-curl -s "http://localhost:8080/api/v1/analyze/platform/drift?drift_type=SYNC_DRIFT" | jq .
+```
+GET /api/v1/{project}/resources
 ```
 
-Valid `drift_type` values: `IMAGE_TAG_DRIFT`, `IMAGE_DIGEST_DRIFT`,
-`SYNC_DRIFT`, `HEALTH_DRIFT`.
+One row per workload per region per AppSet. Shows raw sync and health state
+without cross-region comparison.
 
 ---
 
@@ -389,10 +424,30 @@ spec:
                 secretKeyRef:
                   name: drift-checker-secret
                   key: token
+            - name: DB_PATH
+              value: /data/drift-checker.db
+          volumeMounts:
+            - name: data
+              mountPath: /data
           livenessProbe:
             httpGet:
               path: /healthz
               port: 8080
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: drift-checker-data
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: drift-checker-data
+  namespace: tools
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
 ---
 apiVersion: v1
 kind: Service
@@ -414,28 +469,6 @@ kubectl create secret generic drift-checker-secret \
   --from-literal=token=eyJhbGci... \
   -n tools
 ```
-
----
-
-## Reading the output
-
-**`drift_details[].regions`** is always a map of `region → observed value` so
-you can see exactly what each region has:
-
-```json
-"regions": {
-  "prod-us": "v2.1.0",
-  "prod-ir": "v2.0.9",
-  "stg-us":  "v2.1.0"
-}
-```
-
-For sync and health drift, the value is the ArgoCD status string verbatim:
-`Synced`, `OutOfSync`, `Healthy`, `Degraded`, `Progressing`, `Missing`.
-
-`Missing` means the workload resource did not appear in that region's
-`.status.resources[]` at all — the app exists in ArgoCD for that region
-but the workload was never created or was deleted from the cluster.
 
 ---
 
