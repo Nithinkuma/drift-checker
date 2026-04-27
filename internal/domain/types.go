@@ -82,6 +82,61 @@ type ResourceRef struct {
 	Namespace string `json:"namespace,omitempty"`
 }
 
+// ---- Flat table types ----
+// These are the primary query surface. Instead of nested JSON, each endpoint
+// returns a slice of rows — one concern per endpoint.
+
+// RegionRow is one deployment of an AppSet in one region.
+type RegionRow struct {
+	AppSet       string `json:"appset"`
+	AppName      string `json:"app_name"`
+	Region       string `json:"region"`
+	ClusterName  string `json:"cluster_name"`
+	Namespace    string `json:"namespace"`
+	SyncStatus   string `json:"sync_status"`
+	HealthStatus string `json:"health_status"`
+}
+
+// BuildRow is one image running in one region for one AppSet.
+type BuildRow struct {
+	AppSet     string `json:"appset"`
+	Region     string `json:"region"`
+	Repository string `json:"repository"`
+	Tag        string `json:"tag"`
+	Digest     string `json:"digest,omitempty"`
+	FullImage  string `json:"full_image"`
+}
+
+// BuildDiff is the cross-region image tag comparison for one repository within an AppSet.
+// Regions maps region name → tag currently running there.
+type BuildDiff struct {
+	AppSet     string            `json:"appset"`
+	Repository string            `json:"repository"`
+	HasDiff    bool              `json:"has_diff"`
+	Regions    map[string]string `json:"regions"`
+}
+
+// ResourceRow is one workload resource running in one region for one AppSet.
+type ResourceRow struct {
+	AppSet       string `json:"appset"`
+	Region       string `json:"region"`
+	Kind         string `json:"kind"`
+	Name         string `json:"name"`
+	SyncStatus   string `json:"sync_status"`
+	HealthStatus string `json:"health_status,omitempty"`
+}
+
+// ResourceDiff is the cross-region workload state comparison for one workload within an AppSet.
+// Sync maps region → sync status; Health maps region → health status.
+type ResourceDiff struct {
+	AppSet  string            `json:"appset"`
+	Kind    string            `json:"kind"`
+	Name    string            `json:"name"`
+	HasDiff bool              `json:"has_diff"`
+	Sync    map[string]string `json:"sync"`
+	Health  map[string]string `json:"health,omitempty"`
+}
+
 // Drift type constants.
 const (
 	DriftImageTag    = "IMAGE_TAG_DRIFT"

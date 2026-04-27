@@ -3,6 +3,8 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -23,15 +25,7 @@ func NewHandler(cfg config.Config) *Handler {
 	return &Handler{cfg: cfg}
 }
 
-// ---- request / response helpers ----
-
-// analyzeRequest is the POST /analyze body. ArgocdURL and Token are optional
-// overrides; if omitted, the server's configured defaults are used.
-type analyzeRequest struct {
-	ArgocdURL string `json:"argocd_url"`
-	Token     string `json:"token"`
-	Project   string `json:"project"`
-}
+// ---- shared types ----
 
 type errorResponse struct {
 	Error string `json:"error"`
@@ -50,137 +44,154 @@ func respondError(w http.ResponseWriter, status int, code, msg string) {
 
 // ---- handlers ----
 
-// Healthz returns 200 OK — used by liveness probes.
+// Healthz returns 200 OK.
 func (h *Handler) Healthz(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-// Analyze runs a full drift analysis for a project and returns the report.
+// Regions returns a flat region table — one row per AppSet per region.
 //
-//	POST /api/v1/analyze
-//	Body: { "project": "platform" }
-//	      { "project": "platform", "argocd_url": "...", "token": "..." }  (override)
-func (h *Handler) Analyze(w http.ResponseWriter, r *http.Request) {
-	var req analyzeRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid JSON body")
-		return
-	}
-	if req.Project == "" {
-		respondError(w, http.StatusBadRequest, "INVALID_REQUEST", "project is required")
-		return
-	}
-
-	argoURL, token, ok := h.resolveCredentials(w, req.ArgocdURL, req.Token)
-	if !ok {
-		return
-	}
-
-	report, err := analysis.Run(r.Context(), argoURL, token, req.Project, h.analysisCfg())
-	if err != nil {
-		handleArgoError(w, err)
-		return
-	}
-	respondJSON(w, http.StatusOK, report)
-}
-
-// ListAppSets returns all AppSets for a project with a top-level drift flag.
-//
-//	GET /api/v1/analyze/{project}/appsets
-func (h *Handler) ListAppSets(w http.ResponseWriter, r *http.Request) {
+//	GET /api/v1/{project}/regions
+func (h *Handler) Regions(w http.ResponseWriter, r *http.Request) {
 	project, argoURL, token, ok := h.projectRequest(w, r)
 	if !ok {
 		return
 	}
-
-	report, err := analysis.Run(r.Context(), argoURL, token, project, h.analysisCfg())
+	appsets, err := h.fetchAppSets(r, argoURL, token, project)
 	if err != nil {
 		handleArgoError(w, err)
 		return
 	}
-
-	type appSetSummary struct {
-		Name          string   `json:"name"`
-		DriftDetected bool     `json:"drift_detected"`
-		DriftTypes    []string `json:"drift_types,omitempty"`
-		Regions       []string `json:"regions"`
-	}
-	summaries := make([]appSetSummary, 0, len(report.AppSets))
-	for _, as := range report.AppSets {
-		summaries = append(summaries, appSetSummary{
-			Name:          as.Name,
-			DriftDetected: as.DriftDetected,
-			DriftTypes:    as.DriftTypes,
-			Regions:       uniqueRegions(as.Apps),
-		})
-	}
 	respondJSON(w, http.StatusOK, map[string]any{
-		"project": report.Project,
-		"appsets": summaries,
+		"project": project,
+		"rows":    analysis.FlattenRegions(appsets),
 	})
 }
 
-// GetAppSet returns the full drift detail for one AppSet.
+// Builds returns a flat build table — one row per image per region per AppSet.
 //
-//	GET /api/v1/analyze/{project}/appsets/{appset}
-func (h *Handler) GetAppSet(w http.ResponseWriter, r *http.Request) {
+//	GET /api/v1/{project}/builds
+func (h *Handler) Builds(w http.ResponseWriter, r *http.Request) {
 	project, argoURL, token, ok := h.projectRequest(w, r)
 	if !ok {
 		return
 	}
-	appSetName := chi.URLParam(r, "appset")
-
-	report, err := analysis.Run(r.Context(), argoURL, token, project, h.analysisCfg())
+	appsets, err := h.fetchAppSets(r, argoURL, token, project)
 	if err != nil {
 		handleArgoError(w, err)
 		return
-	}
-
-	for _, as := range report.AppSets {
-		if as.Name == appSetName {
-			respondJSON(w, http.StatusOK, as)
-			return
-		}
-	}
-	respondError(w, http.StatusNotFound, "NOT_FOUND", "appset not found: "+appSetName)
-}
-
-// ListDrift returns only the drifted AppSets, optionally filtered by drift type.
-//
-//	GET /api/v1/analyze/{project}/drift?drift_type=IMAGE_TAG_DRIFT
-func (h *Handler) ListDrift(w http.ResponseWriter, r *http.Request) {
-	project, argoURL, token, ok := h.projectRequest(w, r)
-	if !ok {
-		return
-	}
-	filterType := r.URL.Query().Get("drift_type")
-
-	report, err := analysis.Run(r.Context(), argoURL, token, project, h.analysisCfg())
-	if err != nil {
-		handleArgoError(w, err)
-		return
-	}
-
-	var drifted []domain.AppSet
-	for _, as := range report.AppSets {
-		if !as.DriftDetected {
-			continue
-		}
-		if filterType != "" && !analysis.ContainsDriftType(as.DriftTypes, filterType) {
-			continue
-		}
-		drifted = append(drifted, as)
 	}
 	respondJSON(w, http.StatusOK, map[string]any{
-		"project": report.Project,
-		"appsets": drifted,
+		"project": project,
+		"rows":    analysis.FlattenBuilds(appsets),
+	})
+}
+
+// Resources returns a flat resource table — one row per workload per region per AppSet.
+//
+//	GET /api/v1/{project}/resources
+func (h *Handler) Resources(w http.ResponseWriter, r *http.Request) {
+	project, argoURL, token, ok := h.projectRequest(w, r)
+	if !ok {
+		return
+	}
+	appsets, err := h.fetchAppSets(r, argoURL, token, project)
+	if err != nil {
+		handleArgoError(w, err)
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]any{
+		"project": project,
+		"rows":    analysis.FlattenResources(appsets),
+	})
+}
+
+// DiffBuilds returns the cross-region image tag comparison.
+// Only rows where has_diff=true are returned by default.
+// ?format=csv   → CSV file download
+// ?appset=name  → scope to one AppSet
+// ?all=true     → include non-drifted rows as well
+//
+//	GET /api/v1/{project}/diff/builds
+func (h *Handler) DiffBuilds(w http.ResponseWriter, r *http.Request) {
+	project, argoURL, token, ok := h.projectRequest(w, r)
+	if !ok {
+		return
+	}
+	appsets, err := h.fetchAppSets(r, argoURL, token, project)
+	if err != nil {
+		handleArgoError(w, err)
+		return
+	}
+
+	diffs := analysis.BuildDiffs(appsets)
+	diffs = filterBuildDiffs(diffs, r.URL.Query().Get("appset"), r.URL.Query().Get("all") != "true")
+
+	if r.URL.Query().Get("format") == "csv" {
+		filename := fmt.Sprintf("build-diff-%s.csv", project)
+		w.Header().Set("Content-Type", "text/csv")
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
+		if err := writeBuildDiffCSV(w, diffs); err != nil {
+			slog.Error("csv write error", "err", err)
+		}
+		return
+	}
+
+	respondJSON(w, http.StatusOK, map[string]any{
+		"project": project,
+		"diffs":   diffs,
+	})
+}
+
+// DiffResources returns the cross-region workload state comparison.
+// Only rows where has_diff=true are returned by default.
+// ?format=csv   → CSV file download
+// ?appset=name  → scope to one AppSet
+// ?all=true     → include non-drifted rows as well
+//
+//	GET /api/v1/{project}/diff/resources
+func (h *Handler) DiffResources(w http.ResponseWriter, r *http.Request) {
+	project, argoURL, token, ok := h.projectRequest(w, r)
+	if !ok {
+		return
+	}
+	appsets, err := h.fetchAppSets(r, argoURL, token, project)
+	if err != nil {
+		handleArgoError(w, err)
+		return
+	}
+
+	diffs := analysis.ResourceDiffs(appsets)
+	diffs = filterResourceDiffs(diffs, r.URL.Query().Get("appset"), r.URL.Query().Get("all") != "true")
+
+	if r.URL.Query().Get("format") == "csv" {
+		filename := fmt.Sprintf("resource-diff-%s.csv", project)
+		w.Header().Set("Content-Type", "text/csv")
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
+		if err := writeResourceDiffCSV(w, diffs); err != nil {
+			slog.Error("csv write error", "err", err)
+		}
+		return
+	}
+
+	respondJSON(w, http.StatusOK, map[string]any{
+		"project": project,
+		"diffs":   diffs,
 	})
 }
 
 // ---- helpers ----
 
-// projectRequest extracts the project URL param and the server-level credentials.
-// It returns (project, argoURL, token, ok).
+// fetchAppSets runs the full ArgoCD fetch + group + detect pipeline and
+// returns the analyzed AppSet slice ready for table generation.
+func (h *Handler) fetchAppSets(r *http.Request, argoURL, token, project string) ([]domain.AppSet, error) {
+	report, err := analysis.Run(r.Context(), argoURL, token, project, h.analysisCfg())
+	if err != nil {
+		return nil, err
+	}
+	return report.AppSets, nil
+}
+
 func (h *Handler) projectRequest(w http.ResponseWriter, r *http.Request) (project, argoURL, token string, ok bool) {
 	project = chi.URLParam(r, "project")
 	if project == "" {
@@ -191,9 +202,6 @@ func (h *Handler) projectRequest(w http.ResponseWriter, r *http.Request) (projec
 	return
 }
 
-// resolveCredentials returns credentials to use for an ArgoCD call.
-// Request-level values (from POST body) take precedence over server defaults.
-// Returns false and writes an error response if no credentials are available.
 func (h *Handler) resolveCredentials(w http.ResponseWriter, reqURL, reqToken string) (argoURL, token string, ok bool) {
 	argoURL = reqURL
 	if argoURL == "" {
@@ -235,14 +243,30 @@ func handleArgoError(w http.ResponseWriter, err error) {
 	respondError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
 }
 
-func uniqueRegions(apps []domain.AppInstance) []string {
-	seen := make(map[string]struct{}, len(apps))
-	var out []string
-	for _, a := range apps {
-		if _, ok := seen[a.Region]; !ok {
-			seen[a.Region] = struct{}{}
-			out = append(out, a.Region)
+func filterBuildDiffs(diffs []domain.BuildDiff, appset string, onlyDrifted bool) []domain.BuildDiff {
+	var out []domain.BuildDiff
+	for _, d := range diffs {
+		if appset != "" && d.AppSet != appset {
+			continue
 		}
+		if onlyDrifted && !d.HasDiff {
+			continue
+		}
+		out = append(out, d)
+	}
+	return out
+}
+
+func filterResourceDiffs(diffs []domain.ResourceDiff, appset string, onlyDrifted bool) []domain.ResourceDiff {
+	var out []domain.ResourceDiff
+	for _, d := range diffs {
+		if appset != "" && d.AppSet != appset {
+			continue
+		}
+		if onlyDrifted && !d.HasDiff {
+			continue
+		}
+		out = append(out, d)
 	}
 	return out
 }

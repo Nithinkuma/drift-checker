@@ -67,8 +67,11 @@ func buildInstance(
 	for _, img := range app.Status.Summary.Images {
 		inst.Images = append(inst.Images, ParseImage(img))
 	}
+	// Only store workload kinds — ConfigMap, Service, Ingress, Middleware, etc. are discarded.
 	for _, res := range app.Status.Resources {
-		inst.Resources = append(inst.Resources, mapResource(res))
+		if workloadKinds[res.Kind] {
+			inst.Resources = append(inst.Resources, mapResource(res))
+		}
 	}
 	return inst
 }

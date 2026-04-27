@@ -9,6 +9,15 @@ import (
 )
 
 // NewRouter creates and returns the application router.
+//
+// Routes:
+//
+//	GET  /healthz
+//	GET  /api/v1/{project}/regions                  region table
+//	GET  /api/v1/{project}/builds                   build table (all images)
+//	GET  /api/v1/{project}/resources                resource table (workloads only)
+//	GET  /api/v1/{project}/diff/builds              image tag diffs  (?format=csv, ?appset=, ?all=true)
+//	GET  /api/v1/{project}/diff/resources           workload state diffs  (?format=csv, ?appset=, ?all=true)
 func NewRouter(cfg config.Config) http.Handler {
 	h := NewHandler(cfg)
 	r := chi.NewRouter()
@@ -18,11 +27,12 @@ func NewRouter(cfg config.Config) http.Handler {
 
 	r.Get("/healthz", h.Healthz)
 
-	r.Route("/api/v1", func(r chi.Router) {
-		r.Post("/analyze", h.Analyze)
-		r.Get("/analyze/{project}/appsets", h.ListAppSets)
-		r.Get("/analyze/{project}/appsets/{appset}", h.GetAppSet)
-		r.Get("/analyze/{project}/drift", h.ListDrift)
+	r.Route("/api/v1/{project}", func(r chi.Router) {
+		r.Get("/regions", h.Regions)
+		r.Get("/builds", h.Builds)
+		r.Get("/resources", h.Resources)
+		r.Get("/diff/builds", h.DiffBuilds)
+		r.Get("/diff/resources", h.DiffResources)
 	})
 
 	return r
